@@ -6,9 +6,7 @@ Open-source Python GUI implementing the MeaningFlux analytical framework for edd
 
 ## Overview
 
-MeaningFlux is a Python-based graphical user interface (GUI) designed to support reproducible and transparent analysis of eddy covariance (EC) datasets.
-
-The platform integrates visualization, diagnostics, and advanced analytical tools within a unified framework to facilitate exploration of ecosystem flux dynamics and their environmental drivers.
+MeaningFlux integrates visualization, diagnostics, and advanced analytical tools within a unified framework to facilitate exploration of ecosystem flux dynamics and their environmental drivers.
 
 Core capabilities include:
 
