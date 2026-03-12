@@ -71,13 +71,11 @@ MeaningFlux expects eddy covariance datasets formatted as tabular data files (e.
 
 Typical requirements include:
 
-A timestamp column named TIMESTAMP_START
+- A timestamp column named `TIMESTAMP_START`
+- Regular time intervals (e.g., half-hourly or hourly)
+- Standardized variable names
 
-Regular time intervals (e.g., half-hourly or hourly)
-
-Standardized variable names
-
-Missing values such as -9999 are automatically treated as missing data.
+Missing values such as `-9999` are automatically treated as missing data.
 
 ---
 
