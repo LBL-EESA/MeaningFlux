@@ -37,20 +37,29 @@ Clone the repository:
 ```bash
 git clone https://github.com/LBL-EESA/MeaningFlux.git
 cd MeaningFlux
+```
 
 Create a Python environment (recommended):
+
+```bash
 conda create -n meaningflux python=3.10
 conda activate meaningflux
+```
 
 Install required dependencies:
+
+```bash
 pip install -r requirements.txt
+```
 
 ---
 
 ## Running MeaningFlux
 From the repository root directory, launch the GUI with:
 
+```bash
 python MeaningFlux_main.py
+```
 
 This will open the MeaningFlux graphical interface.
 
@@ -74,13 +83,15 @@ Missing values such as -9999 are automatically treated as missing data.
 
 ## Repository Structure
 
+```
 MeaningFlux/
 │
-├── MeaningFlux_main.py        # Main GUI launcher
-├── src/                       # Core analysis modules
-├── docs/                      # Documentation assets (figures, logo, screenshots)
-├── requirements.txt           # Python dependencies
+├── MeaningFlux_main.py
+├── src/
+├── docs/
+├── requirements.txt
 └── README.md
+```
 
 ---
 
@@ -101,7 +112,9 @@ A manuscript describing the MeaningFlux analytical framework is currently in pre
 
 This software is provided for research and educational purposes. Users are responsible for verifying results and ensuring appropriate interpretation of outputs when applying the software to scientific analyses.
 
-License and Copyright
+---
+
+## License and Copyright
 
 *** Copyright Notice ***
 
