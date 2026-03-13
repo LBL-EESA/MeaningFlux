@@ -99,6 +99,16 @@ MeaningFlux/
 
 ---
 
+## Author
+
+**Leila Hernandez Rodriguez**  
+Postdoctoral Research Fellow  
+Energy Geosciences Division 
+Lawrence Berkeley National Laboratory  
+GitHub: https://github.com/leilaher
+
+---
+
 ## Citation
 
 If you use MeaningFlux in academic work, please cite the software repository:
