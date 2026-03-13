@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/MeaningFlux_logo.png" width="500">
+  <img src="docs/MeaningFlux_logo.png" width="300">
 </p>
 
 # MeaningFlux
@@ -13,7 +13,7 @@ Open-source Python GUI implementing the MeaningFlux analytical framework for edd
 MeaningFlux integrates visualization, diagnostics, and advanced analytical tools within a unified framework to facilitate exploration of ecosystem flux dynamics and their environmental drivers.
 
 <p align="center">
-  <img src="docs/1_main.png" width="800">
+  <img src="docs/1_main.png" width="500">
 </p>
 
 Core capabilities include:
