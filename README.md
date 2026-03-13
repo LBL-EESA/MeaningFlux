@@ -103,10 +103,11 @@ MeaningFlux/
 
 **Leila Hernandez Rodriguez**  
 Postdoctoral Research Fellow  
-Energy Geosciences Division 
-Lawrence Berkeley National Laboratory 
-GitHub: https://github.com/leilaher 
-Linkedin: https://www.linkedin.com/in/leilaher/ 
+Energy Geosciences Division  
+Lawrence Berkeley National Laboratory  
+
+GitHub: https://github.com/leilaher  
+LinkedIn: https://www.linkedin.com/in/leilaher/
 
 ---
 
