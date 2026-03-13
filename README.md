@@ -52,24 +52,11 @@ pip install -r requirements.txt
 
 ---
 
-## Quick Start
-
-```bash
-git clone https://github.com/LBL-EESA/MeaningFlux.git
-cd MeaningFlux
-conda create -n meaningflux python=3.10
-conda activate meaningflux
-pip install -r requirements.txt
-python scripts/MeaningFlux_main.py
-```
-
----
-
 ## Running MeaningFlux
 From the repository root directory, launch the GUI with:
 
 ```bash
-python MeaningFlux_main.py
+python scripts/MeaningFlux_main.py
 ```
 
 This will open the MeaningFlux graphical interface.
