@@ -82,11 +82,11 @@ Missing values such as `-9999` are automatically treated as missing data.
 ```
 MeaningFlux/
 │
-├── MeaningFlux_main.py
-├── src/
-├── docs/
-├── requirements.txt
-└── README.md
+├── scripts/MeaningFlux_main.py  # Main launcher for the MeaningFlux GUI
+├── src/  # Core computational modules
+├── docs/  # Images and documentation
+├── requirements.txt  # Python dependencies required to run MeaningFlux
+└── README.md  # Project documentation and usage instructions
 ```
 
 ---
