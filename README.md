@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/MeaningFlux_logo.png" width="500">
+</p>
+
 # MeaningFlux
 
 Open-source Python GUI implementing the MeaningFlux analytical framework for eddy covariance data: standardized visualization, gap-filling, footprint/fetch metrics, machine-learning predictability, and information-theoretic diagnostics.
@@ -7,6 +11,10 @@ Open-source Python GUI implementing the MeaningFlux analytical framework for edd
 ## Overview
 
 MeaningFlux integrates visualization, diagnostics, and advanced analytical tools within a unified framework to facilitate exploration of ecosystem flux dynamics and their environmental drivers.
+
+<p align="center">
+  <img src="docs/1_main.png" width="800">
+</p>
 
 Core capabilities include:
 
