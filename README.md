@@ -106,6 +106,7 @@ Postdoctoral Research Fellow
 Energy Geosciences Division 
 Lawrence Berkeley National Laboratory  
 GitHub: https://github.com/leilaher
+https://www.linkedin.com/in/leilaher/
 
 ---
 
