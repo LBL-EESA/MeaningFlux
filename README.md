@@ -130,7 +130,7 @@ This software is provided for research and educational purposes. Users are respo
 
 ---
 
-## License and Copyright
+## Copyright
 
 *** Copyright Notice ***
 
