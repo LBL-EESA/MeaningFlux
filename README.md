@@ -113,14 +113,11 @@ LinkedIn: https://www.linkedin.com/in/leilaher/
 
 ## Citation
 
-If you use MeaningFlux in academic work, please cite the software repository:
+If you use MeaningFlux in academic work, please cite the software as:
 
-Hernandez Rodriguez, L., & Wu, Y. (2026).
-MeaningFlux (Version 1.0).
-Lawrence Berkeley National Laboratory.
-GitHub repository: https://github.com/LBL-EESA/MeaningFlux
+Hernandez Rodriguez, L. C. (2026). MeaningFlux (Version 1.0) [Computer software]. Lawrence Berkeley National Laboratory. https://github.com/LBL-EESA/MeaningFlux
 
-A manuscript describing the MeaningFlux analytical framework is currently in preparation.
+A manuscript describing the MeaningFlux analytical framework and technical validation is currently in preparation.
 
 ---
 
