@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use MeaningFlux in your research, please cite the software using the metadata in this file."
+type: software
+title: "MeaningFlux"
+version: "1.0"
+authors:
+  - family-names: "Hernandez Rodriguez"
+    given-names: "Leila Constanza"
+    affiliation: "Lawrence Berkeley National Laboratory"
+repository-code: "https://github.com/LBL-EESA/MeaningFlux"
+url: "https://github.com/LBL-EESA/MeaningFlux"
+license: "BSD-3-Clause-LBNL"
+abstract: >-
+  MeaningFlux is an open-source workflow for machine-learning and
+  information-theoretic analysis of post-processed eddy covariance data.
+  It integrates data inspection, predictive modeling, an ML-to-information-
+  theory bridge, and diagnostics of nonlinear dependence, information
+  fidelity, lagged information transfer, redundancy, uniqueness, and synergy.
+keywords:
+  - eddy covariance
+  - machine learning
+  - information theory
+  - mutual information
+  - transfer entropy
+  - environmental data analysis
+  - scientific software
