@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use MeaningFlux in your research, please cite the software using the DOE CODE/OSTI record."
+type: software
+title: "MeaningFlux"
+version: "1.0"
+authors:
+  - family-names: "Hernandez Rodriguez"
+    given-names: "Leila Constanza"
+    orcid: "https://orcid.org/0000-0001-8830-345X"
+    affiliation: "Lawrence Berkeley National Laboratory"
+repository-code: "https://github.com/LBL-EESA/MeaningFlux"
+url: "https://www.osti.gov/doecode/biblio/178023"
+license: "BSD-3-Clause-LBNL"
+identifiers:
+  - type: other
+    value: "DOE CODE 178023"
+    description: "DOE CODE/OSTI software record"
+  - type: other
+    value: "2026doe..soft...43H"
+    description: "NASA ADS bibliographic code"
+abstract: >-
+  MeaningFlux is an open-source workflow for machine-learning and
+  information-theoretic analysis of post-processed eddy covariance data.
+  It integrates data inspection, predictive modeling, an ML-to-information-
+  theory bridge, and diagnostics of nonlinear dependence, information
+  fidelity, lagged information transfer, redundancy, uniqueness, and synergy.
+keywords:
+  - eddy covariance
+  - machine learning
+  - information theory
+  - mutual information
+  - transfer entropy
+  - environmental data analysis
+  - scientific software
+
+# The DOE CODE/OSTI record already has a DOI. Copy the exact DOI displayed on
+# https://www.osti.gov/doecode/biblio/178023 into a top-level field in this form:
+# doi: "10.xxxx/xxxxx"
