@@ -12,12 +12,8 @@ What this module does
 ---------------------
   • Detects the N₂O flux column by name (case-insensitive), preferring exact 'FN2O' or 'N2O',
     otherwise any column that STARTS WITH 'FN2O' or 'N2O' (e.g., 'FN2O_1_1_1', 'n2o_flux').
-  • Optional short-gap interpolation for tiny holes.
   • kNN model using available driver variables (with simple median imputation).
   • Seasonal climatology fallback (month/week/DOY median; week handling is index-aligned).
-  • Keeps original column; writes <target> with qualifier order like: FN2O_1_1_1 → FN2O_F_1_1_1
-    (i.e., inserts “_F” before trailing numeric qualifiers; if none, appends “_F”).
-  • Preserves TIMESTAMP_START format (YYYYMMDDHHMM) on save. Saved CSV converts numeric NaN ↔ -9999.
 """
 
 import os

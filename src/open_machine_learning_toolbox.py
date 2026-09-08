@@ -1,43 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MeaningFlux — Machine Learning Toolbox (EC-friendly, thread-safe, comparable)
+MeaningFlux — Machine Learning Toolbox 
 Author: Leila C. Hernandez (LBNL)
-Updated: 2026-07-16 (endpoint-target sequence correction)
-
-Key updates:
-- Concise in-window guidance; detailed explanations retained in Guide tabs
-- Renamed "Flow-Gate LSTM" -> **Hysteresis-Gate LSTM (H-LSTM)**
-- Robust timestamp handling (no reliance on index having 'TIMESTAMP_START')
-- Plot x-axis uses datetime when available (else fallback to index)
-- Compare → Overlay now always plots (legend + labels guaranteed)
-- Explicit Step 4 training/testing pool with user-facing split guidance
-- Reorganized Predict tab into a model-first guided workflow: model/parameters, target, time/aggregation, predictors, validation, run/results, and IT export
-- Training tab shows curves only for epoch-based models; others show a short note
-- H-LSTM: simplified and robust timestamp + sequence construction
-- Optional Predictor Screening: compares literature-informed presets with RF importance, |Pearson r|, and |standardized linear coefficient|
-  and a Compare tab to visualize differences; clearer explanation of Hysteresis Explorer
-- IT bridge export: exports aligned drivers + observed target + model predictions for Information Theory diagnostics
-- Literature-informed predictor presets based on selected flux target (FC/FCH4/FN2O/LE/H/GPP/RECO)
-- Native manuscript export: Compare → Export Fig 2C creates a publication-ready observed-vs-predicted test-period panel from MeaningFlux predictions
-- Leakage-free train-only scaling for MLP, LSTM, and H-LSTM, with inverse-transformed predictions
-- True multistep Keras LSTM and H-LSTM sequence construction
-- Expanding-window blocked time-series validation with common date windows across model classes
-- Target-aware temporal aggregation (mean for states/rates; sum for accumulated precipitation/management inputs)
-- Minimum 75% inferred within-period coverage for daily/weekly aggregates
-- Original-unit RMSE/MAE, robust nRMSE, fold-level metrics, held-out RF permutation importance, and Figure 3B common-timestamp export
-- Figure 3B preset, common gap-safe endpoint folds, exact five-model checks, fixed site-level nRMSE denominator, concise reporting, and explicit preprocessing metadata
-- Gap-safe LSTM/H-LSTM sequences: predictors must be complete across consecutive windows; the target is required only at the prediction endpoint
-- Controlled sequence comparison: LSTM and H-LSTM use the same Keras architecture/training; H-LSTM differs only by the added delta-gate input
-- Figure 3B uses 7-day sequences and five expanding folds defined on common gap-safe sequence endpoints shared by all models
-- Training-mean and training-only seasonal-climatology baselines evaluated on identical held-out timestamps
-- Optional FC daytime/nighttime daily sensitivity analysis; locked main Figure 3B remains all-observation daily flux
-- Gap-aware plots keep one color per observed/predicted series and never connect across missing intervals
-- Compare supports repeated runs of the same model; Figure 3B export remains one run per model
-- Exact blocked-CV fold integrity: requested folds are never silently dropped; all models use common H-LSTM-eligible temporal cutoffs
-- Gap-aware time-series rendering: lines break at missing periods instead of connecting across months or years
-- H-LSTM sequence arrays are constructed once and reused across folds for exact alignment and faster training
-- User-selectable high-impact model parameters, random seed, initial CV training fraction, resampling completeness, and aggregation overrides
 """
 
 import time, math, queue, threading, re, platform

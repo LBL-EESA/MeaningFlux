@@ -2,8 +2,7 @@
 """
 Author: Leila Hernandez, LBNL
 Date: June 14, 2024
-Description: Function to plot time series data. Users can select one or two variables to plot from a list and view the corresponding 
-             time series plot within the same window. The second variable, if selected, will be plotted on a secondary Y-axis. 
+Description: Function to plot time series data. Users can select one or two variables to plot from a list and view the corresponding time series plot within the same window. The second variable, if selected, will be plotted on a secondary Y-axis. 
              Users can modify the date range to display in the plot and save the plot to a specified directory.
 """
 

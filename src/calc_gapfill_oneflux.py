@@ -7,8 +7,8 @@ Citation
 The FLUXNET2015 dataset and the ONEFlux processing pipeline for eddy covariance data.
 Scientific Data (Nature Research), 2020. https://www.nature.com/articles/s41597-020-0534-3
 
-What this window does
 ---------------------
+Workflow:
 • VPD estimation:
   If a VPD column is not provided, VPD is estimated via TA+RH (preferred) or TA+Tdew using
   oneflux_py3.vpd_tools.ensure_vpd_series. Output column “VPD” (and “VPD_est_hPa” if estimated).
@@ -18,24 +18,6 @@ What this window does
 • Nighttime partition:
   Computes ecosystem respiration (Reco_nt) by fitting a temperature response to nighttime data,
   then GPP_nt = Reco_nt − NEE. Also outputs Rref, E0, and qf_partition_nt.
-• Preview & QA:
-  Shows time step, duplicate-timestamp count, NaN counts, and the VPD estimation plan before running.
-• Progress & UX:
-  Local indeterminate progress bar (and shared header progress bar if provided) while processing.
-• Saving & metadata:
-  Writes a CSV and a TXT metadata file into a “oneflux” results folder next to the input CSV.
-
-Outputs & file conventions
---------------------------
-• CSV formatting:
-  - TIMESTAMP_START is written as YYYYMMDDHHMM (string).
-  - NaNs are written as -9999 (numeric columns), per AmeriFlux practice.
-  - All original (non gap-filled) columns are preserved.
-• New/derived columns:
-  - *_F  : gap-filled variables (drivers and/or NEE/FC).
-  - Reco_nt, GPP_nt, Rref, E0, qf_partition_nt from nighttime partition.
-• UI label:
-  The window header includes a “MeaningFlux • ONEFlux” label for consistency with the suite.
 
 Notes
 -----

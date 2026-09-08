@@ -10,8 +10,6 @@ FFP GUI (satellite background) with:
  - Satellite basemap centered at (lat, lon) in the main window (big & fixed extent)
  - Aerodynamic canopy height plot opens in a separate Tk window (embedded canvas)
  - Draw red source-area contours for rs 10–90%
- - NEW: Option to draw contours for **every timestep** (not just stride)
- - NEW: Option to **accumulate** all contours (keep previous lines lighter)
  - Compute FETCH_70_M / FETCH_80_M / FETCH_90_M from contours (fallback to grid)
  - Compute FETCH_MAX_M (distance to peak contribution) from grid
  - Progress bar + ETA + Pause/Continue

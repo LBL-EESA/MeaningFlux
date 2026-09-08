@@ -2,7 +2,6 @@
 """
 Author: Leila Hernandez, LBNL
 Date: June 14, 2024
-Description: 
     
 """
 import os

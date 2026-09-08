@@ -4,13 +4,6 @@
 MeaningFlux — Information Theory Toolbox (timestamp-preserving temporal update)
 Author: Leila C. Hernandez (LBNL) 
 
-Key points:
-- Uses the same DataFrame philosophy as the ML toolbox:
-  * We trust the incoming df (already cleaned upstream).
-  * We do NOT pre-filter columns as "numeric only".
-  * When a variable is selected, we convert that column to numeric on-the-fly
-    with pd.to_numeric(errors='coerce') and drop NaNs.
-
 Features:
 - Entropy H(X)
 - Mutual Information I(X;Y) (histogram or KDE-based TIP)
@@ -42,11 +35,6 @@ Features:
 - Reproducibility metadata export for manuscript/SI reporting
 - ML-to-IT bridge import: reads aligned prediction tables exported from the ML toolbox
 
-IMPORTANT: The public entry point is flexible:
-  - Pattern A (MeaningFlux main app):
-        open_information_theory_toolbox(df, inputname_site)
-  - Pattern B (standalone demo / other GUIs):
-        open_information_theory_toolbox(parent_widget, df)
 """
 
 from __future__ import annotations

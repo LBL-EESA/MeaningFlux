@@ -2,26 +2,13 @@
 """
 MeaningFlux – CH₄ Gap-Fill (GUI Window)
 ---------------------------------------
-Author: Leila C. Hernandez Rodriguez (LBNL) – with ChatGPT assistance
+Author: Leila C. Hernandez Rodriguez (LBNL) 
+Runs multiple ML methods used for CH₄ gap-filling at FLUXNET-CH4 wetlands.
 
-Save this file as **calc_gapfill_CH4.py** next to your main GUI script.
-
-What this provides
-- A toplevel window titled "MeaningFlux: CH₄ Gap-Fill" that mirrors your N₂O/ONEFlux UX.
-- Runs multiple ML methods used for CH₄ gap-filling at FLUXNET-CH4 wetlands.
-- Creates per-method filled columns: <TARGET>_F_<Method> and an ensemble <TARGET>_F.
-- Keeps all original columns; converts NaN→-9999 only when exporting CSV.
-- Uses the DataFrame you pass in (no separate file loading UI).
-
-Citations (displayed in the window)
+Citations 
 - Irvin, J., Zhou, S., McNicol, G., et al. (2021) Agricultural and Forest Meteorology 308–309, 108528.
   DOI: 10.1016/j.agrformet.2021.108528
 - Stanford ML Group: methane-gapfill-ml (https://github.com/stanfordmlgroup/methane-gapfill-ml)
-
-Notes
-- -9999 values are mapped to NaN on load, and scikit-learn pipelines impute remaining NaNs.
-- XGBoost is optional; if not installed, that method is automatically skipped.
-- All tkinter mutations from the worker happen via `after(...)` to stay thread-safe.
 """
 
 from __future__ import annotations
