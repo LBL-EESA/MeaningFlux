@@ -146,123 +146,135 @@ def show_about():
     messagebox.showinfo("About MeaningFlux", about_text)
 
 
+def show_workflow_guide():
+    guide_text = (
+        "MeaningFlux recommended workflow\n\n"
+        "1. Load data and metadata\n"
+        "   Start with a post-processed EC CSV and add BADM, NDVI, or LAI when available.\n\n"
+        "2. Explore, QA/QC, and footprint context\n"
+        "   Inspect temporal patterns, missingness, quality flags, and source-area representativeness before modeling.\n\n"
+        "3. Gap-fill when needed\n"
+        "   Use gap-filling only when a complete time series is required for budgets, prediction, or information diagnostics.\n\n"
+        "4. Run AI-assisted analysis\n"
+        "   Use ML first to quantify predictability and export the bridge table. Then use IT to evaluate nonlinear dependence, lagged information transfer, redundancy, synergy, and information fidelity.\n\n"
+        "Tip: The workflow is site-level. Repeat the same steps across sites to create comparable outputs."
+    )
+    messagebox.showinfo("MeaningFlux Workflow Guide", guide_text)
+
+
 # ===================== GUI =====================
 def MeaningFlux_main_window():
     global df, inputname, inputname_site, inputCSV
 
     root = tk.Tk()
     root.title("MeaningFlux")
-    _center(root, 500, 400)
+    _center(root, 900, 460)
+    root.minsize(860, 420)
+    root.resizable(True, True)
     root.configure(bg="#f4f4f4")
 
     # -------------------------------------------------------------------------
-    # Menu bar (Help → About)
+    # Menu bar
     # -------------------------------------------------------------------------
     menubar = tk.Menu(root)
-
     help_menu = tk.Menu(menubar, tearoff=0)
+    help_menu.add_command(label="Workflow guide", command=show_workflow_guide)
     help_menu.add_command(label="About MeaningFlux", command=show_about)
-
     menubar.add_cascade(label="Help", menu=help_menu)
     root.config(menu=menubar)
 
     # -------------------------------------------------------------------------
-    # Header – centered logo, no visible wait bar
+    # Main layout: persistent workflow sidebar + content dashboard
     # -------------------------------------------------------------------------
-    header = tk.Frame(root, bg="#f4f4f4")
-    header.grid(row=0, column=0, columnspan=2, sticky="we", padx=10, pady=(6, 2))
-    header.grid_columnconfigure(0, weight=1)
+    shell = tk.Frame(root, bg="#f4f4f4")
+    shell.pack(fill="both", expand=True, padx=10, pady=10)
+    shell.grid_columnconfigure(0, weight=0)
+    shell.grid_columnconfigure(1, weight=1)
+    shell.grid_rowconfigure(0, weight=1)
 
-    # Load logo without distortion; only shrink if too tall
-    try:
-        img = Image.open(ROOT / "docs" / "MeaningFlux_logo.png")
-        orig_w, orig_h = img.size
-        target_h = 120
-        if orig_h > target_h:
-            scale = target_h / orig_h
-            new_w = int(orig_w * scale)
-            img = img.resize((new_w, target_h), Image.LANCZOS)
-        logo = ImageTk.PhotoImage(img)
-        logo_label = tk.Label(header, image=logo, bg="#f4f4f4")
-        logo_label.image = logo
-    except Exception:
-        logo_label = tk.Label(
-            header,
-            text="MeaningFlux",
-            font=("Arial", 20, "bold"),
-            bg="#f4f4f4"
-        )
-
-    # Center the logo
-    logo_label.grid(row=0, column=0, pady=4)
-
-    # Status (centered under logo)
-    status = tk.Label(header, text="", bg="#f4f4f4", fg="#666")
-    status.grid(row=1, column=0, sticky="we", pady=(2, 4))
-
-    # Subtle Help / About button (top-right corner)
-    help_btn = tk.Button(
-        header,
-        text="ⓘ",
-        command=show_about,
-        relief="flat",
-        bg="#f4f4f4",
-        fg="#888",
-        font=("Arial", 12),
-        cursor="hand2"
-    )
-    help_btn.grid(row=0, column=1, sticky="ne", padx=4, pady=4)
-
-    header.grid_columnconfigure(1, weight=0)
-
-    # (Optional) if your other modules need a Progressbar object, create one but do NOT grid it
-    pb = Progressbar(header, mode="indeterminate", length=200)
-
-    # -------------------------------------------------------------------------
-    # Main layout: sidebar + content panel
-    # -------------------------------------------------------------------------
-    main = tk.Frame(root, bg="#f4f4f4")
-    main.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10, pady=(0, 6))
-
-    root.grid_rowconfigure(1, weight=1)
-    root.grid_columnconfigure(0, weight=1)
-
-    sidebar = tk.Frame(main, bg="#e9e9e9", width=150)
+    sidebar = tk.Frame(shell, bg="#e9e9e9", width=185, relief="flat")
     sidebar.grid(row=0, column=0, sticky="nsw")
     sidebar.grid_propagate(False)
 
-    content = tk.Frame(main, bg="#ffffff", relief="solid", bd=1)
+    content = tk.Frame(shell, bg="#ffffff", relief="solid", bd=1)
     content.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-    main.grid_columnconfigure(1, weight=1)
-    main.grid_rowconfigure(0, weight=1)
+    content.grid_columnconfigure(0, weight=1)
+    content.grid_rowconfigure(0, weight=1)
 
-    # -------------------------------------------------------------------------
-    # Step frames + navigation
-    # -------------------------------------------------------------------------
+    # Logo in persistent sidebar to save vertical space in every step.
+    try:
+        img = Image.open(ROOT / "docs" / "MeaningFlux_logo.png")
+        orig_w, orig_h = img.size
+        target_h = 74
+        if orig_h > target_h:
+            scale = target_h / orig_h
+            img = img.resize((int(orig_w * scale), target_h), Image.LANCZOS)
+        logo = ImageTk.PhotoImage(img)
+        logo_label = tk.Label(sidebar, image=logo, bg="#e9e9e9")
+        logo_label.image = logo
+    except Exception:
+        logo_label = tk.Label(sidebar, text="MeaningFlux", font=("Arial", 16, "bold"), bg="#e9e9e9")
+    logo_label.grid(row=0, column=0, sticky="we", padx=8, pady=(8, 4))
+
+    status = tk.Label(
+        sidebar,
+        text="Load EC data to begin.",
+        bg="#e9e9e9",
+        fg="#555555",
+        wraplength=160,
+        justify="center",
+        font=("Arial", 9),
+    )
+    status.grid(row=1, column=0, sticky="we", padx=8, pady=(0, 8))
+
+    workflow_label = tk.Label(
+        sidebar,
+        text="Workflow",
+        bg="#e9e9e9",
+        fg="#333333",
+        font=("Arial", 10, "bold"),
+        anchor="w",
+    )
+    workflow_label.grid(row=2, column=0, sticky="we", padx=10, pady=(4, 4))
+
+    # Hidden progressbar kept for compatibility with other modules.
+    pb = Progressbar(sidebar, mode="indeterminate", length=140)
+
     step_frames = {}
     nav_buttons = {}
-    analysis_buttons = []  # all buttons that should be disabled until EC CSV is loaded
+    analysis_buttons = []
+
+    def section_note(parent, text, row=0, column=0, columnspan=2, wraplength=360):
+        lbl = tk.Label(parent, text=text, fg="#666666", justify="left", wraplength=wraplength)
+        lbl.grid(row=row, column=column, columnspan=columnspan, sticky="w", padx=4, pady=(0, 5))
+        return lbl
+
+    def compact_button(parent, text, command, row, column=0, state="disabled", width=None, padx=4, pady=4):
+        b = Button(parent, text=text, state=state, command=command, width=width)
+        b.grid(row=row, column=column, padx=padx, pady=pady, sticky="w")
+        return b
 
     def show(step):
-        for k, f in step_frames.items():
+        for f in step_frames.values():
             f.grid_forget()
-        frame = step_frames[step]
-        frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        step_frames[step].grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
         for k, b in nav_buttons.items():
             b.config(bg="#e9e9e9")
         nav_buttons[step].config(bg="#d0d0d0")
 
+        if df is None or getattr(df, "empty", True):
+            status.config(text="Load EC data to begin.")
+        else:
+            status.config(text=f"Loaded\n{inputname}.csv")
+
     steps = [
-        ("step1", "① Input data"),
-        ("step2", "② Visualization"),
-        ("step3", "③ QA/QC"),
-        ("step4", "④ Gap-filling"),
-        ("step5", "⑤ Flux Footprint"),
-        ("step6", "⑥ AI / IT"),
+        ("step1", "① Data"),
+        ("step2", "② QA/QC"),
+        ("step3", "③ Gap-fill"),
+        ("step4", "④ ML–IT"),
     ]
 
-    # Sidebar buttons – only Step 1 enabled initially
     for i, (key, text) in enumerate(steps):
         state = "normal" if key == "step1" else "disabled"
         b = tk.Button(
@@ -275,31 +287,92 @@ def MeaningFlux_main_window():
             state=state,
             command=lambda k=key: show(k),
         )
-        b.grid(row=i, column=0, sticky="we", padx=5, pady=2)
+        b.grid(row=i + 3, column=0, sticky="we", padx=6, pady=2)
         nav_buttons[key] = b
 
-    sidebar.grid_rowconfigure(len(steps) + 1, weight=1)
+    sidebar.grid_rowconfigure(8, weight=1)
+
+    guide_btn = tk.Button(
+        sidebar,
+        text="Workflow guide",
+        anchor="w",
+        bg="#e9e9e9",
+        relief="flat",
+        padx=10,
+        command=show_workflow_guide,
+    )
+    guide_btn.grid(row=9, column=0, sticky="we", padx=6, pady=(8, 2))
+
+    about_btn = tk.Button(
+        sidebar,
+        text="About / license",
+        anchor="w",
+        bg="#e9e9e9",
+        relief="flat",
+        padx=10,
+        command=show_about,
+    )
+    about_btn.grid(row=10, column=0, sticky="we", padx=6, pady=(2, 8))
 
     # -------------------------------------------------------------------------
-    # STEP 1 – Load EC, BADM, NDVI/LAI
+    # STEP 1 – Data
     # -------------------------------------------------------------------------
     step1 = tk.Frame(content, bg="#ffffff")
     step_frames["step1"] = step1
+    step1.grid_columnconfigure(0, weight=1)
+    step1.grid_columnconfigure(1, weight=1)
 
+    tk.Label(step1, text="Step 1 – Load EC data", bg="#ffffff", font=("Arial", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
+    )
     tk.Label(
         step1,
-        text="Step 1 – Load EC data and metadata",
+        text="Start with a post-processed eddy covariance CSV. Optional metadata and vegetation variables can be added before analysis.",
         bg="#ffffff",
-        font=("Arial", 12, "bold"),
-    ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        fg="#555555",
+        wraplength=660,
+        justify="left",
+    ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-    lf_ec = LabelFrame(step1, text="1.1 EC + BADM", padx=6, pady=6)
-    lf_ec.grid(row=1, column=0, sticky="we")
+    lf_required = LabelFrame(step1, text="Required input", padx=6, pady=6)
+    lf_required.grid(row=2, column=0, sticky="nwe", padx=(0, 6), pady=6)
+    section_note(lf_required, "EC CSV with TIMESTAMP_START.", row=0, columnspan=2, wraplength=300)
 
     path_var = tk.StringVar(value="No EC file loaded")
-    tk.Label(lf_ec, textvariable=path_var, fg="#444").grid(
-        row=0, column=0, columnspan=3, sticky="w"
+    tk.Label(lf_required, textvariable=path_var, fg="#444", justify="left", wraplength=300).grid(
+        row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 4)
     )
+
+    summary_var = tk.StringVar(value="Dataset summary\nNot loaded yet.")
+
+    def _dataset_summary_text(df_):
+        if df_ is None or getattr(df_, "empty", True):
+            return "Dataset summary\nNot loaded yet."
+        n_rows = len(df_)
+        n_cols = len(df_.columns)
+        if "TIMESTAMP_START" in df_.columns:
+            t = pd.to_datetime(df_["TIMESTAMP_START"], errors="coerce")
+            tmin = t.min()
+            tmax = t.max()
+            if pd.notna(tmin) and pd.notna(tmax):
+                dt = t.sort_values().diff().dropna()
+                step_txt = "unknown"
+                if not dt.empty:
+                    med = dt.median()
+                    mins = med.total_seconds() / 60
+                    if mins >= 60 and abs(mins % 60) < 1e-6:
+                        step_txt = f"{mins/60:.0f} h"
+                    else:
+                        step_txt = f"{mins:.0f} min"
+                return (
+                    "Dataset summary\n"
+                    f"Site/file: {inputname_site or inputname or 'loaded'}\n"
+                    f"Time span: {tmin:%Y-%m-%d} to {tmax:%Y-%m-%d}\n"
+                    f"Native step: {step_txt}\n"
+                    f"Records: {n_rows:,}\n"
+                    f"Variables: {n_cols:,}"
+                )
+        return f"Dataset summary\nRecords: {n_rows:,}\nVariables: {n_cols:,}"
 
     def load_csv():
         nonlocal path_var
@@ -322,9 +395,7 @@ def MeaningFlux_main_window():
 
         tmp["TIMESTAMP_START"] = _safe_to_datetime(tmp["TIMESTAMP_START"])
         if tmp["TIMESTAMP_START"].isna().all():
-            messagebox.showerror(
-                "Error", "Could not parse TIMESTAMP_START as datetime."
-            )
+            messagebox.showerror("Error", "Could not parse TIMESTAMP_START as datetime.")
             return
 
         tmp["DATESTAMP_START"] = tmp["TIMESTAMP_START"].dt.floor("D")
@@ -336,27 +407,23 @@ def MeaningFlux_main_window():
         inputname_site = inputname
 
         path_var.set(f"Loaded: {inputname}.csv")
-        status.config(text="EC data loaded. All tools unlocked.")
-        status.config(text=f"Loaded: {inputname}.csv")
+        summary_var.set(_dataset_summary_text(df))
+        status.config(text=f"Loaded\n{inputname}.csv")
 
-        # Enable all analysis buttons and other steps
         for btn in analysis_buttons:
             btn.config(state="normal")
         for key, btn in nav_buttons.items():
             if key != "step1":
                 btn.config(state="normal")
 
-    # Only enabled button at startup
-    btn_load_ec = Button(lf_ec, text="Load EC CSV", command=load_csv)
-    btn_load_ec.grid(row=1, column=0, padx=4, pady=4)
+    compact_button(lf_required, "Load EC CSV", load_csv, row=2, column=0, state="normal")
 
-    btn_badm = Button(lf_ec, text="Input BADM", command=open_BADM_window, state="disabled")
-    btn_badm.grid(row=1, column=1, padx=4, pady=4)
+    lf_optional = LabelFrame(step1, text="Optional inputs", padx=6, pady=6)
+    lf_optional.grid(row=2, column=1, sticky="nwe", padx=(6, 0), pady=6)
+    section_note(lf_optional, "Add site metadata or vegetation proxies only when useful for interpretation.", row=0, columnspan=2, wraplength=310)
+
+    btn_badm = compact_button(lf_optional, "Input BADM", open_BADM_window, row=1, column=0, state="disabled")
     analysis_buttons.append(btn_badm)
-
-    # --- NDVI / LAI ---
-    lf_lai = LabelFrame(step1, text="1.2 NDVI / LAI (optional)", padx=6, pady=6)
-    lf_lai.grid(row=2, column=0, sticky="we", pady=6)
 
     def load_ndvi():
         if not _ensure_df():
@@ -368,13 +435,9 @@ def MeaningFlux_main_window():
         mod.rename(columns={c: c.strip() for c in mod.columns}, inplace=True)
         mod["DATESTAMP_START"] = pd.to_datetime(mod.get("dt"), errors="coerce").dt.date
         mod = mod[["DATESTAMP_START", "value_mean"]]
-        df["NDVI"] = pd.merge(
-            df[["DATESTAMP_START"]],
-            mod,
-            on="DATESTAMP_START",
-            how="left",
-        )["value_mean"]
+        df["NDVI"] = pd.merge(df[["DATESTAMP_START"]], mod, on="DATESTAMP_START", how="left")["value_mean"]
         df["NDVI_intp"] = df["NDVI"].interpolate()
+        summary_var.set(_dataset_summary_text(df))
         messagebox.showinfo("Done", "NDVI loaded.")
 
     def load_lai():
@@ -388,93 +451,72 @@ def MeaningFlux_main_window():
             messagebox.showerror("Error", "No 'LAI' column in file.")
             return
         df["LAI"] = lai["LAI"].values[: len(df)]
+        summary_var.set(_dataset_summary_text(df))
         messagebox.showinfo("Done", "LAI loaded.")
 
-    btn_ndvi = Button(lf_lai, text="NDVI (MODIS)", command=load_ndvi, state="disabled")
-    btn_ndvi.grid(row=0, column=0, padx=4, pady=4)
-    analysis_buttons.append(btn_ndvi)
+    btn_ndvi = compact_button(lf_optional, "NDVI (MODIS)", load_ndvi, row=2, column=0, state="disabled")
+    btn_lai = compact_button(lf_optional, "LAI field", load_lai, row=2, column=1, state="disabled")
+    analysis_buttons.extend([btn_ndvi, btn_lai])
 
-    btn_lai = Button(lf_lai, text="LAI field", command=load_lai, state="disabled")
-    btn_lai.grid(row=0, column=1, padx=4, pady=4)
-    analysis_buttons.append(btn_lai)
-
+    lf_summary = LabelFrame(step1, text="Loaded dataset", padx=8, pady=8)
+    lf_summary.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+    tk.Label(lf_summary, textvariable=summary_var, justify="left", fg="#333333", wraplength=660).grid(row=0, column=0, sticky="w")
 
     # -------------------------------------------------------------------------
-    # STEP 2 – Visualization (two columns)
+    # STEP 2 – QA/QC dashboard
     # -------------------------------------------------------------------------
     step2 = tk.Frame(content, bg="#ffffff")
     step_frames["step2"] = step2
+    step2.grid_columnconfigure(0, weight=1)
+    step2.grid_columnconfigure(1, weight=1)
 
-    tk.Label(
-        step2,
-        text="Step 2 – Visualization tools",
-        bg="#ffffff",
-        font=("Arial", 12, "bold"),
-    ).grid(row=0, column=0, sticky="w")
+    tk.Label(step2, text="Step 2 – Explore, QA/QC, and footprint context", bg="#ffffff", font=("Arial", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
+    )
+    tk.Label(step2, text="Inspect data quality before gap-filling or AI analysis.", bg="#ffffff", fg="#555555").grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
+    )
 
-    lf2 = LabelFrame(step2, padx=6, pady=6)
-    lf2.grid(row=1, column=0, sticky="nw", pady=6)
+    lf2_viz = LabelFrame(step2, text="2.1 Exploration", padx=6, pady=6)
+    lf2_viz.grid(row=2, column=0, columnspan=2, sticky="we", pady=6)
+    lf2_viz.grid_columnconfigure(0, weight=1)
+    lf2_viz.grid_columnconfigure(1, weight=1)
+    lf2_viz.grid_columnconfigure(2, weight=1)
+    section_note(lf2_viz, "Check seasonality, gaps, outliers, driver ranges, and flux--driver relationships.", row=0, columnspan=3, wraplength=620)
 
     viz_buttons = [
         ("Time series", calc_plot_time_series),
-        ("Daily Avg", calc_plot_daily_avg),
-        ("Wind Rose", calc_plot_wind_rose),
-        ("Density & Scatter", calc_plot_density_and_scatter),
+        ("Daily averages", calc_plot_daily_avg),
+        ("Wind rose", calc_plot_wind_rose),
+        ("Density & scatter", calc_plot_density_and_scatter),
         ("Correlations", calc_plot_correlations),
         ("Budgets", calc_plot_budgets),
     ]
-
     for i, (text, func) in enumerate(viz_buttons):
-        r = i // 2
-        c = i % 2
-        b = Button(
-            lf2,
-            text=text,
-            state="disabled",
-            command=lambda f=func: _call(f, df, inputname_site),
-        )
-        b.grid(row=r, column=c, padx=6, pady=4, sticky="w")
+        b = Button(lf2_viz, text=text, state="disabled", command=lambda f=func: _call(f, df, inputname_site))
+        b.grid(row=(i // 3) + 1, column=i % 3, padx=6, pady=4, sticky="w")
         analysis_buttons.append(b)
 
-    # -------------------------------------------------------------------------
-    # STEP 3 – QA/QC
-    # -------------------------------------------------------------------------
-    step3 = tk.Frame(content, bg="#ffffff")
-    step_frames["step3"] = step3
-    
-    tk.Label(
-        step3,
-        text="Step 3 – QA/QC & diagnostics",
-        bg="#ffffff",
-        font=("Arial", 12, "bold"),
-    ).grid(row=0, column=0, sticky="w")
-    
-    lf3 = LabelFrame(step3, padx=6, pady=6)
-    lf3.grid(row=1, column=0, sticky="nw", pady=6)
-    
-    # Row 0
-    b_standard_qaqc = Button(
-        lf3,
-        text="Standard QA/QC",
-        state="disabled",
-        command=lambda: _call(calc_standard_QAQC, df, inputname_site),
-    )
-    b_standard_qaqc.grid(row=0, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_standard_qaqc)
-    
-    # Row 1
-    b_data_av = Button(
-        lf3,
-        text="Data availability",
-        state="disabled",
-        command=lambda: _call(calc_data_availability, df, inputname_site),
-    )
-    b_data_av.grid(row=1, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_data_av)
-    
-    # Row 2
+    lf2_qaqc = LabelFrame(step2, text="2.2 QA/QC and completeness", padx=6, pady=6)
+    lf2_qaqc.grid(row=3, column=0, sticky="nwe", padx=(0, 6), pady=6)
+    section_note(lf2_qaqc, "Define analysis subset, apply flags, and document usable coverage.", row=0, wraplength=310)
+
+    qaqc_buttons = [
+        ("Guided Standard QA/QC", calc_standard_QAQC),
+        ("Data availability", calc_data_availability),
+        ("AmeriFlux BASE QA/QC", calc_data_AMF_BASE_QAQC),
+    ]
+    for i, (text, func) in enumerate(qaqc_buttons):
+        b = Button(lf2_qaqc, text=text, state="disabled", command=lambda f=func: _call(f, df, inputname_site))
+        b.grid(row=i + 1, column=0, padx=4, pady=4, sticky="w")
+        analysis_buttons.append(b)
+
+    lf2_fp = LabelFrame(step2, text="2.3 Footprint context", padx=6, pady=6)
+    lf2_fp.grid(row=3, column=1, sticky="nwe", padx=(6, 0), pady=6)
+    section_note(lf2_fp, "Use when source-area representativeness or fetch may affect interpretation.", row=0, wraplength=310)
+
     b_dir_rose = Button(
-        lf3,
+        lf2_fp,
         text="Directional contribution rose",
         state="disabled",
         command=lambda: _call(
@@ -485,154 +527,102 @@ def MeaningFlux_main_window():
             getattr(UpdatedValues, "lon", None),
         ),
     )
-    b_dir_rose.grid(row=2, column=0, padx=4, pady=4, sticky="w")
+    b_dir_rose.grid(row=1, column=0, padx=4, pady=4, sticky="w")
     analysis_buttons.append(b_dir_rose)
-    
-    # Row 3 (LAST)
-    b_qaqc = Button(
-        lf3,
-        text="AMERIFLUX BASE QAQC",
-        state="disabled",
-        command=lambda: _call(calc_data_AMF_BASE_QAQC, df, inputname_site),
+
+    b_ffp = Button(lf2_fp, text="FFP calculations", state="disabled", command=lambda: _call(calc_FFP_window, df, UpdatedValues, inputname_site))
+    b_ffp.grid(row=2, column=0, padx=4, pady=4, sticky="w")
+    analysis_buttons.append(b_ffp)
+
+    b_fetch = Button(lf2_fp, text="Fetch rose", state="disabled", command=lambda: _call(calc_plot_fetch_rose, df, inputname_site))
+    b_fetch.grid(row=3, column=0, padx=4, pady=4, sticky="w")
+    analysis_buttons.append(b_fetch)
+
+    # -------------------------------------------------------------------------
+    # STEP 3 – Gap filling
+    # -------------------------------------------------------------------------
+    step3 = tk.Frame(content, bg="#ffffff")
+    step_frames["step3"] = step3
+    step3.grid_columnconfigure(0, weight=1)
+    step3.grid_columnconfigure(1, weight=1)
+
+    tk.Label(step3, text="Step 3 – Gap-filling and flux completion", bg="#ffffff", font=("Arial", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
     )
-    b_qaqc.grid(row=3, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_qaqc)
+    tk.Label(step3, text="Use gap-filling only when complete series are needed for budgets, ML, or IT diagnostics.", bg="#ffffff", fg="#555555").grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
+    )
 
-
-    # -------------------------------------------------------------------------
-    # STEP 4 – Gap-filling
-    # -------------------------------------------------------------------------
-    step4 = tk.Frame(content, bg="#ffffff")
-    step_frames["step4"] = step4
-
-    tk.Label(
-        step4,
-        text="Step 4 – Gap-filling methods",
-        bg="#ffffff",
-        font=("Arial", 12, "bold"),
-    ).grid(row=0, column=0, sticky="w")
-
-    lf4 = LabelFrame(step4, padx=6, pady=6)
-    lf4.grid(row=1, column=0, sticky="nw", pady=6)
+    lf3_gap = LabelFrame(step3, text="3.1 Gap-filling methods", padx=6, pady=6)
+    lf3_gap.grid(row=2, column=0, sticky="nwe", padx=(0, 6), pady=6)
+    section_note(lf3_gap, "Original and gap-filled variables remain separate for provenance.", row=0, wraplength=310)
 
     def set_df(new):
         global df
         df = new
-        status.config(text="Dataset updated by gap-filling.")
+        summary_var.set(_dataset_summary_text(df))
+        status.config(text="Dataset updated")
 
-    # If your open_oneflux_window still expects a progressbar, pb is a dummy but valid object
-    b_oneflux = Button(
-        lf4,
-        text="ONEFlux gap-fill + partition",
-        state="disabled",
-        command=lambda: open_oneflux_window(root, df, inputname_site, inputCSV, pb, set_df),
-    )
-    b_oneflux.grid(row=0, column=0, padx=4, pady=4, sticky="w")
+    b_oneflux = Button(lf3_gap, text="ONEFlux gap-fill + partition", state="disabled", command=lambda: open_oneflux_window(root, df, inputname_site, inputCSV, pb, set_df))
+    b_oneflux.grid(row=1, column=0, padx=4, pady=4, sticky="w")
     analysis_buttons.append(b_oneflux)
 
-    b_n2o = Button(
-        lf4,
-        text="Gap-fill N₂O",
-        state="disabled",
-        command=lambda: calc_gapfill_N2O(
-            parent=root,
-            df_in=df,
-            inputname_site=inputname_site,
-            inputCSV=inputCSV,
-            shared_progressbar=pb,
-            on_update_df=set_df,
-        ),
-    )
-    b_n2o.grid(row=1, column=0, padx=4, pady=4, sticky="w")
+    b_n2o = Button(lf3_gap, text="Gap-fill N₂O", state="disabled", command=lambda: calc_gapfill_N2O(parent=root, df_in=df, inputname_site=inputname_site, inputCSV=inputCSV, shared_progressbar=pb, on_update_df=set_df))
+    b_n2o.grid(row=2, column=0, padx=4, pady=4, sticky="w")
     analysis_buttons.append(b_n2o)
 
-    b_ch4 = Button(
-        lf4,
-        text="Gap-fill CH₄",
-        state="disabled",
-        command=lambda: calc_gapfill_CH4(
-            parent=root,
-            df_in=df,
-            inputname_site=inputname_site,
-            inputCSV=inputCSV,
-            shared_progressbar=pb,
-            on_update_df=set_df,
-        ),
-    )
-    b_ch4.grid(row=2, column=0, padx=4, pady=4, sticky="w")
+    b_ch4 = Button(lf3_gap, text="Gap-fill CH₄", state="disabled", command=lambda: calc_gapfill_CH4(parent=root, df_in=df, inputname_site=inputname_site, inputCSV=inputCSV, shared_progressbar=pb, on_update_df=set_df))
+    b_ch4.grid(row=3, column=0, padx=4, pady=4, sticky="w")
     analysis_buttons.append(b_ch4)
 
-    # -------------------------------------------------------------------------
-    # STEP 5 – Footprint
-    # -------------------------------------------------------------------------
-    step5 = tk.Frame(content, bg="#ffffff")
-    step_frames["step5"] = step5
-
+    lf3_note = LabelFrame(step3, text="Recommended use", padx=8, pady=8)
+    lf3_note.grid(row=2, column=1, sticky="nwe", padx=(6, 0), pady=6)
     tk.Label(
-        step5,
-        text="Step 5 – Flux footprint",
-        bg="#ffffff",
-        font=("Arial", 12, "bold"),
+        lf3_note,
+        text="Use after QA/QC when:\n\n• cumulative budgets require complete records\n• ML needs a continuous predictor or target\n• IT diagnostics require aligned samples\n\nKeep raw and gap-filled variables separate.",
+        justify="left",
+        fg="#444444",
+        wraplength=310,
     ).grid(row=0, column=0, sticky="w")
 
-    lf5 = LabelFrame(step5, padx=6, pady=6)
-    lf5.grid(row=1, column=0, sticky="nw", pady=6)
-
-    b_ffp = Button(
-        lf5,
-        text="FFP calculations",
-        state="disabled",
-        command=lambda: _call(calc_FFP_window, df, UpdatedValues, inputname_site),
-    )
-    b_ffp.grid(row=0, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_ffp)
-
-    b_fetch = Button(
-        lf5,
-        text="Fetch Rose",
-        state="disabled",
-        command=lambda: _call(calc_plot_fetch_rose, df, inputname_site),
-    )
-    b_fetch.grid(row=1, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_fetch)
-
     # -------------------------------------------------------------------------
-    # STEP 6 – AI / IT
+    # STEP 4 – ML to IT
     # -------------------------------------------------------------------------
-    step6 = tk.Frame(content, bg="#ffffff")
-    step_frames["step6"] = step6
+    step4 = tk.Frame(content, bg="#ffffff")
+    step_frames["step4"] = step4
+    step4.grid_columnconfigure(0, weight=1)
+    step4.grid_columnconfigure(1, weight=1)
 
+    tk.Label(step4, text="Step 4 – Integrated ML–IT analysis", bg="#ffffff", font=("Arial", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
+    )
+    tk.Label(step4, text="Run ML first to predict the target flux; then use IT to evaluate information structure and model fidelity.", bg="#ffffff", fg="#555555").grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
+    )
+
+    lf4_flow = LabelFrame(step4, text="4.1 Workflow", padx=8, pady=8)
+    lf4_flow.grid(row=2, column=0, sticky="nwe", padx=(0, 6), pady=6)
     tk.Label(
-        step6,
-        text="Step 6 – AI & Information Theory",
-        bg="#ffffff",
-        font=("Arial", 12, "bold"),
+        lf4_flow,
+        text="① Predict target flux\n\n↓\n\n② Export ML-to-IT bridge\n\n↓\n\n③ Diagnose nonlinear dependence, lags, redundancy, synergy, and information fidelity",
+        justify="left",
+        fg="#333333",
+        wraplength=310,
     ).grid(row=0, column=0, sticky="w")
 
-    lf6 = LabelFrame(step6, padx=6, pady=6)
-    lf6.grid(row=1, column=0, sticky="nw", pady=6)
+    lf4_tools = LabelFrame(step4, text="4.2 Toolboxes", padx=8, pady=8)
+    lf4_tools.grid(row=2, column=1, sticky="nwe", padx=(6, 0), pady=6)
+    section_note(lf4_tools, "ML quantifies out-of-sample predictability. IT tests whether predictions preserve observed information structure.", row=0, wraplength=310)
 
-    b_it = Button(
-        lf6,
-        text="Information Theory Toolbox",
-        state="disabled",
-        command=lambda: _call(open_information_theory_toolbox, df, inputname_site),
-    )
-    b_it.grid(row=0, column=0, padx=4, pady=4, sticky="w")
-    analysis_buttons.append(b_it)
-
-    b_ml = Button(
-        lf6,
-        text="Machine Learning Toolbox",
-        state="disabled",
-        command=lambda: _call(open_machine_learning_toolbox, df, inputname_site),
-    )
-    b_ml.grid(row=1, column=0, padx=4, pady=4, sticky="w")
+    b_ml = Button(lf4_tools, text="1. Machine Learning Toolbox", state="disabled", command=lambda: _call(open_machine_learning_toolbox, df, inputname_site))
+    b_ml.grid(row=1, column=0, padx=4, pady=6, sticky="we")
     analysis_buttons.append(b_ml)
 
-    # Start on Step 1
-    show("step1")
+    b_it = Button(lf4_tools, text="2. Information Theory Toolbox", state="disabled", command=lambda: _call(open_information_theory_toolbox, df, inputname_site))
+    b_it.grid(row=2, column=0, padx=4, pady=6, sticky="we")
+    analysis_buttons.append(b_it)
 
+    show("step1")
     root.mainloop()
 
 

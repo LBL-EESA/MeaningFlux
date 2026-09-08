@@ -1,3 +1,20 @@
-numpy pandas matplotlib Pillow scipy scikit-learn seaborn geopandas
-contextily shapely pyproj windrose folium tkhtmlview ipython requests
-xlrd psycopg2-binary future pytest
+numpy
+pandas
+matplotlib
+Pillow
+scipy
+scikit-learn
+seaborn
+geopandas
+contextily
+shapely
+pyproj
+windrose
+folium
+tkhtmlview
+ipython
+requests
+xlrd
+psycopg2-binary
+future
+pytest

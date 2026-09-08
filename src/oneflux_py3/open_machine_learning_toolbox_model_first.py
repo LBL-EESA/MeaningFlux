@@ -3,7 +3,7 @@
 """
 MeaningFlux — Machine Learning Toolbox (EC-friendly, thread-safe, comparable)
 Author: Leila C. Hernandez (LBNL)
-Updated: 2026-07-16 (endpoint-target sequence correction)
+Updated: 2026-07-13
 
 Key updates:
 - Concise in-window guidance; detailed explanations retained in Guide tabs
@@ -26,17 +26,6 @@ Key updates:
 - Target-aware temporal aggregation (mean for states/rates; sum for accumulated precipitation/management inputs)
 - Minimum 75% inferred within-period coverage for daily/weekly aggregates
 - Original-unit RMSE/MAE, robust nRMSE, fold-level metrics, held-out RF permutation importance, and Figure 3B common-timestamp export
-- Figure 3B preset, common gap-safe endpoint folds, exact five-model checks, fixed site-level nRMSE denominator, concise reporting, and explicit preprocessing metadata
-- Gap-safe LSTM/H-LSTM sequences: predictors must be complete across consecutive windows; the target is required only at the prediction endpoint
-- Controlled sequence comparison: LSTM and H-LSTM use the same Keras architecture/training; H-LSTM differs only by the added delta-gate input
-- Figure 3B uses 7-day sequences and five expanding folds defined on common gap-safe sequence endpoints shared by all models
-- Training-mean and training-only seasonal-climatology baselines evaluated on identical held-out timestamps
-- Optional FC daytime/nighttime daily sensitivity analysis; locked main Figure 3B remains all-observation daily flux
-- Gap-aware plots keep one color per observed/predicted series and never connect across missing intervals
-- Compare supports repeated runs of the same model; Figure 3B export remains one run per model
-- Exact blocked-CV fold integrity: requested folds are never silently dropped; all models use common H-LSTM-eligible temporal cutoffs
-- Gap-aware time-series rendering: lines break at missing periods instead of connecting across months or years
-- H-LSTM sequence arrays are constructed once and reused across folds for exact alignment and faster training
 - User-selectable high-impact model parameters, random seed, initial CV training fraction, resampling completeness, and aggregation overrides
 """
 
@@ -405,19 +394,13 @@ def _required_resample_count(series, interval, min_coverage=_MIN_RESAMPLE_COVERA
 
 
 def _resample_df(df, interval, ts_col, min_coverage=_MIN_RESAMPLE_COVERAGE,
-                 sum_columns=None, mean_columns=None, drop_complete_cases=True,
-                 coverage_relative_to_available_rows=False):
-    """Resample with explicit aggregation and a completeness threshold.
+                 sum_columns=None, mean_columns=None):
+    """Resample with user-reviewable aggregation and a completeness threshold.
 
     State and rate variables are averaged. Detected interval accumulations are
-    summed unless the user forces them to mean. Set ``drop_complete_cases=False``
-    when building coverage reports so variable-specific missingness is preserved.
-
-    ``coverage_relative_to_available_rows`` is used for optional daytime/nighttime
-    sensitivity analyses. After filtering to daylight or darkness, the expected
-    number of records varies seasonally. In that mode, each variable must be
-    present for the requested fraction of the retained subdaily timestamps in
-    that day/week, rather than for the same fraction of a full 24-hour interval.
+    summed unless the user forces them to mean. Additional columns may be forced
+    to sum. A value is retained only when the requested fraction of its inferred
+    native observations is available.
     """
     df = df.copy()
     df[ts_col] = _to_datetime_1d(df[ts_col])
@@ -426,118 +409,15 @@ def _resample_df(df, interval, ts_col, min_coverage=_MIN_RESAMPLE_COVERAGE,
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     grouped = df.resample(interval)
-    available_rows = grouped.size()
     pieces = {}
     for c in numeric_cols:
-        method = _resampling_method_for_column(
-            c, sum_columns=sum_columns, mean_columns=mean_columns
-        )
+        method = _resampling_method_for_column(c, sum_columns=sum_columns, mean_columns=mean_columns)
         aggregated = grouped[c].sum(min_count=1) if method == "sum" else grouped[c].mean()
+        required = _required_resample_count(df[c], interval, min_coverage=min_coverage)
         observed = grouped[c].count()
-        if coverage_relative_to_available_rows:
-            required = np.ceil(float(min_coverage) * available_rows).clip(lower=1).astype(int)
-            pieces[c] = aggregated.where(observed >= required)
-        else:
-            required = _required_resample_count(df[c], interval, min_coverage=min_coverage)
-            pieces[c] = aggregated.where(observed >= required)
-    out = pd.DataFrame(pieces)
-    return out.dropna(how="any") if drop_complete_cases else out
+        pieces[c] = aggregated.where(observed >= required)
+    return pd.DataFrame(pieces).dropna(how="any")
 
-
-def _reporting_frame(df, columns, ts_col, rs_mode, min_coverage,
-                     sum_columns=None, mean_columns=None,
-                     coverage_relative_to_available_rows=False):
-    """Return the period-filtered analysis table without complete-case deletion."""
-    cols = list(dict.fromkeys(list(columns)))
-    base = df[cols + [ts_col]].copy()
-    base[ts_col] = _to_datetime_1d(base[ts_col])
-    base = base.dropna(subset=[ts_col])
-    if rs_mode == 1:
-        return _resample_df(
-            base, "D", ts_col, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            drop_complete_cases=False,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-        )
-    if rs_mode == 2:
-        return _resample_df(
-            base, "W", ts_col, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            drop_complete_cases=False,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-        )
-    base = base.set_index(ts_col).sort_index()
-    for c in cols:
-        base[c] = pd.to_numeric(base[c], errors="coerce")
-    return base.replace([np.inf, -np.inf], np.nan)
-
-
-def _infer_expected_timestep(index):
-    """Infer the dominant positive timestep from a datetime index."""
-    idx = pd.DatetimeIndex(pd.to_datetime(index, errors="coerce")).dropna().sort_values().unique()
-    if len(idx) < 2:
-        return pd.NaT
-    deltas = pd.Series(pd.to_timedelta(np.diff(idx.asi8), unit="ns"))
-    deltas = deltas[deltas > pd.Timedelta(0)]
-    if deltas.empty:
-        return pd.NaT
-    mode = deltas.mode()
-    return pd.Timedelta(mode.iloc[0] if not mode.empty else deltas.median())
-
-
-def _timestamp_gap_diagnostics(index, expected_step=None):
-    """Summarize gaps relative to the expected timestep."""
-    idx = pd.DatetimeIndex(pd.to_datetime(index, errors="coerce")).dropna().sort_values().unique()
-    step = pd.Timedelta(expected_step) if expected_step is not None and not pd.isna(expected_step) else _infer_expected_timestep(idx)
-    out = {
-        "expected_timestep": str(step) if not pd.isna(step) else "not available",
-        "n_gaps": 0,
-        "max_interval": "not available",
-        "max_interval_days": np.nan,
-    }
-    if len(idx) < 2 or pd.isna(step):
-        return out
-    diffs = pd.to_timedelta(np.diff(idx.asi8), unit="ns")
-    tolerance = max(pd.Timedelta(seconds=1), step * 1e-6)
-    gap_mask = diffs > (step + tolerance)
-    max_interval = pd.Timedelta(diffs.max()) if len(diffs) else pd.NaT
-    out.update({
-        "n_gaps": int(np.sum(gap_mask)),
-        "max_interval": str(max_interval) if not pd.isna(max_interval) else "not available",
-        "max_interval_days": (float(max_interval / pd.Timedelta(days=1)) if not pd.isna(max_interval) else np.nan),
-    })
-    return out
-
-
-def _variable_coverage_summary(frame, columns, target, gate_variable=None,
-                               sum_columns=None, mean_columns=None):
-    """Create one concise coverage row per modeled variable."""
-    rows = []
-    n_total = int(len(frame))
-    expected_step = _infer_expected_timestep(frame.index)
-    for c in columns:
-        series = pd.to_numeric(frame[c], errors="coerce") if c in frame.columns else pd.Series(dtype=float)
-        valid = series.dropna()
-        gaps = _timestamp_gap_diagnostics(valid.index, expected_step=expected_step)
-        role = "target" if c == target else "predictor"
-        if gate_variable and c == gate_variable:
-            role = "predictor; H-LSTM gate"
-        rows.append({
-            "variable": c,
-            "role": role,
-            "aggregation": _resampling_method_for_column(
-                c, sum_columns=sum_columns, mean_columns=mean_columns
-            ),
-            "n_period_rows": n_total,
-            "n_valid": int(valid.shape[0]),
-            "n_missing": int(max(0, n_total - valid.shape[0])),
-            "valid_percent": (100.0 * valid.shape[0] / n_total if n_total else np.nan),
-            "first_valid": valid.index.min() if not valid.empty else pd.NaT,
-            "last_valid": valid.index.max() if not valid.empty else pd.NaT,
-            "n_gaps": gaps["n_gaps"],
-            "max_interval_days": gaps["max_interval_days"],
-        })
-    return pd.DataFrame(rows)
 
 def _resampling_summary(columns, min_coverage=_MIN_RESAMPLE_COVERAGE,
                         sum_columns=None, mean_columns=None):
@@ -581,62 +461,21 @@ def _metrics(y_true, y_pred):
     return m["rmse"], m["mae"], m["r2"]
 
 
-def _nrmse_with_reference_range(rmse, observed_p05, observed_p95):
-    """Normalize RMSE with one predefined observed P5-P95 range.
-
-    Figure 3B fold intervals must use the same site-level denominator; otherwise
-    fold-to-fold changes in observed variability are confounded with changes in
-    prediction error.
-    """
-    robust_range = float(observed_p95) - float(observed_p05)
-    if not np.isfinite(rmse) or not np.isfinite(robust_range) or robust_range <= 0:
-        return np.nan
-    return float(100.0 * float(rmse) / robust_range)
-
-
-def _fold_metric_record(fold, y_true, y_pred, train_idx=None, test_idx=None,
-                        timestamps=None, all_timestamps=None,
-                        sequence_diagnostics=None):
-    """Return fold metrics plus exact train/test periods and gap-window counts."""
+def _fold_metric_record(fold, y_true, y_pred, train_idx=None, test_idx=None, timestamps=None):
     m = _metric_bundle(y_true, y_pred)
     out = {"fold": int(fold), **m}
     out["n_train"] = int(len(train_idx)) if train_idx is not None else np.nan
     out["n_test"] = int(len(test_idx)) if test_idx is not None else int(m["n"])
-
-    train_ts = pd.DatetimeIndex([])
-    if all_timestamps is not None and train_idx is not None:
-        try:
-            all_ts = pd.DatetimeIndex(pd.to_datetime(all_timestamps, errors="coerce"))
-            train_ts = all_ts[np.asarray(train_idx, dtype=int)].dropna()
-        except Exception:
-            train_ts = pd.DatetimeIndex([])
-    test_ts = pd.DatetimeIndex([])
     if timestamps is not None:
         try:
-            test_ts = pd.DatetimeIndex(pd.to_datetime(timestamps, errors="coerce")).dropna()
+            ts = pd.Series(_to_datetime_1d(timestamps)).dropna()
+            out["test_start"] = ts.min() if not ts.empty else pd.NaT
+            out["test_end"] = ts.max() if not ts.empty else pd.NaT
         except Exception:
-            test_ts = pd.DatetimeIndex([])
-
-    out["train_start"] = train_ts.min() if len(train_ts) else pd.NaT
-    out["train_end"] = train_ts.max() if len(train_ts) else pd.NaT
-    out["test_start"] = test_ts.min() if len(test_ts) else pd.NaT
-    out["test_end"] = test_ts.max() if len(test_ts) else pd.NaT
-
-    rejected = pd.DatetimeIndex([])
-    if sequence_diagnostics:
-        try:
-            rejected = pd.DatetimeIndex(sequence_diagnostics.get("rejected_timestamps", [])).dropna()
-        except Exception:
-            rejected = pd.DatetimeIndex([])
-    out["n_rejected_gap_windows_train"] = (
-        int(((rejected >= train_ts.min()) & (rejected <= train_ts.max())).sum())
-        if len(rejected) and len(train_ts) else 0
-    )
-    out["n_rejected_gap_windows_test"] = (
-        int(((rejected >= test_ts.min()) & (rejected <= test_ts.max())).sum())
-        if len(rejected) and len(test_ts) else 0
-    )
+            out["test_start"] = pd.NaT
+            out["test_end"] = pd.NaT
     return out
+
 
 def _plain_model_name(model_name):
     """Short user-facing label for model names."""
@@ -652,35 +491,6 @@ def _plain_model_name(model_name):
     if "MLP" in txt or "Neural" in txt:
         return "MLP"
     return txt
-
-def _comparison_run_label(run, index=None):
-    """Return a compact unique label, including settings for repeated models."""
-    base = _plain_model_name(run.get("model", "model"))
-    params = run.get("model_parameters") or {}
-    details = []
-    if base in ("LSTM", "H-LSTM"):
-        if run.get("sequence_length") is not None:
-            details.append(f"seq={run.get('sequence_length')}")
-        if run.get("hidden_size") is not None:
-            details.append(f"h={run.get('hidden_size')}")
-        if base == "H-LSTM" and run.get("gate_variable"):
-            details.append(f"gate={run.get('gate_variable')}")
-    elif base == "Random Forest":
-        if params.get("n_estimators") is not None:
-            details.append(f"trees={params.get('n_estimators')}")
-        if params.get("min_samples_leaf") is not None:
-            details.append(f"leaf={params.get('min_samples_leaf')}")
-    elif base == "MLP":
-        if params.get("hidden_units") is not None:
-            details.append(f"h={params.get('hidden_units')}")
-        elif run.get("hidden_size") is not None:
-            details.append(f"h={run.get('hidden_size')}")
-    diurnal = str(run.get("diurnal_mode") or "All observations")
-    if not diurnal.lower().startswith("all"):
-        details.append(diurnal)
-    prefix = f"Run {int(index)+1}: " if index is not None else ""
-    return prefix + base + (" [" + ", ".join(details) + "]" if details else "")
-
 
 def _interpret_ml_result(model_name, target, features, rmse, mae, r2, resample_label, nrmse=np.nan):
     """Create plain-language interpretation for the latest ML result."""
@@ -734,11 +544,11 @@ def _ml_workflow_guide_text():
         "• Random Forest: trees, minimum leaf size, maximum depth, maximum features, and held-out permutation repeats.\n"
         "• MLP: hidden units, maximum iterations, L2 alpha, and learning rate. Random internal early stopping is intentionally disabled because it would not preserve time order.\n"
         "• LSTM: sequence length, hidden units, epochs per fold, batch size, learning rate, and dropout.\n"
-        "• LSTM and H-LSTM: sequence length, hidden units, epochs, batch size, learning rate, dropout, and gradient clipping are shared. H-LSTM uses the same Keras model and differs only by the added Δgate input channel.\n\n"
+        "• H-LSTM: sequence length, hidden units, epochs, gate, learning rate, dropout, and gradient clipping. H-LSTM uses full-batch optimization within each fold.\n\n"
         "Step 6 — Read the results together.\n"
         "Use Metrics, Series, Scatter, Residuals, Feature Importance, Training, and Interpretation. Metrics are calculated only from held-out/out-of-fold predictions in original target units.\n\n"
         "Step 7 — Compare and export.\n"
-        "Use Export Fig 3B results to align all five models on identical held-out timestamps. Use Save ML–IT bridge or Open in IT to evaluate whether model predictions preserve observed driver–flux information structure.\n"
+        "Use Export Fig 3B comparison to align models on identical held-out timestamps. Use Save ML–IT bridge or Open in IT to evaluate whether model predictions preserve observed driver–flux information structure.\n"
     )
 
 
@@ -1045,40 +855,18 @@ def _apply_predictor_preset_to_listbox(lb, cols, target, timestamp_col=None, sta
     return selected, family, guide
 
 def _resample_view(df_local, rs_mode, tscol, min_coverage=_MIN_RESAMPLE_COVERAGE,
-                   sum_columns=None, mean_columns=None,
-                   coverage_relative_to_available_rows=False,
-                   drop_complete_cases=True):
-    """Return a native/daily/weekly analysis frame.
-
-    Sequence construction must preserve rows where the target is missing because
-    the target is needed only at the prediction endpoint, not at every predictor
-    step. Set ``drop_complete_cases=False`` for LSTM/H-LSTM source frames and
-    create a separate complete endpoint frame for nonsequence models.
-    """
+                   sum_columns=None, mean_columns=None):
     if rs_mode == 1:
-        return _resample_df(
-            df_local, "D", tscol, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-            drop_complete_cases=drop_complete_cases,
-        ), "Daily"
+        return _resample_df(df_local, "D", tscol, min_coverage=min_coverage,
+                            sum_columns=sum_columns, mean_columns=mean_columns), "Daily"
     if rs_mode == 2:
-        return _resample_df(
-            df_local, "W", tscol, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-            drop_complete_cases=drop_complete_cases,
-        ), "Weekly"
-    # Native; ensure datetime column exists and is valid.
+        return _resample_df(df_local, "W", tscol, min_coverage=min_coverage,
+                            sum_columns=sum_columns, mean_columns=mean_columns), "Weekly"
+    # Native; ensure datetime column exists and is valid
     dfw = df_local.copy()
     dfw[tscol] = _to_datetime_1d(dfw[tscol])
-    dfw = dfw.dropna(subset=[tscol]).set_index(tscol, drop=False).sort_index()
-    numeric_cols = [c for c in dfw.columns if c != tscol]
-    for c in numeric_cols:
-        dfw[c] = pd.to_numeric(dfw[c], errors="coerce")
-    dfw = dfw.replace([np.inf, -np.inf], np.nan)
-    if drop_complete_cases:
-        dfw = dfw.dropna(subset=numeric_cols, how="any")
+    dfw = dfw.dropna(subset=[tscol]).set_index(tscol, drop=False)
+    dfw = dfw.dropna(how="any")
     return dfw, "Native"
 
 
@@ -1151,110 +939,6 @@ def _filter_analysis_period(df_local, tscol, start_text=None, end_text=None):
     if out.empty:
         raise ValueError("No data remain after applying the selected analysis period.")
     return out
-
-
-def _guess_daylight_column(columns):
-    """Choose a sensible radiation variable for optional day/night filtering."""
-    cols = list(columns)
-    priorities = (
-        ("SW_IN", "SWIN", "SHORTWAVE_IN"),
-        ("PPFD_IN", "PAR_IN"),
-        ("PPFD", "PAR"),
-        ("NETRAD", "RNET", "NET_RADIATION", "RN"),
-        ("PPFD_DIF",),
-    )
-    for aliases in priorities:
-        for c in cols:
-            u = str(c).upper()
-            parts = _split_name_parts(c) if "_split_name_parts" in globals() else [u]
-            if any(u == a or u.startswith(a + "_") or (parts and parts[0] == a) for a in aliases):
-                if "OUT" not in u:
-                    return c
-    return cols[0] if cols else ""
-
-
-def _apply_diurnal_subset(df_local, tscol, mode="All observations",
-                           radiation_col=None, threshold=10.0):
-    """Filter subdaily observations before aggregation for FC sensitivity tests.
-
-    Daytime is defined as radiation strictly above ``threshold``; nighttime is
-    radiation less than or equal to it. The classifier can be a shortwave, PPFD,
-    PAR, or net-radiation column. The main Figure 3B workflow uses All observations.
-    """
-    mode_text = str(mode or "All observations")
-    if mode_text.lower().startswith("all"):
-        return df_local.copy(), {
-            "diurnal_mode": "All observations",
-            "daylight_variable": None,
-            "daylight_threshold": np.nan,
-            "rows_before_diurnal_filter": int(len(df_local)),
-            "rows_after_diurnal_filter": int(len(df_local)),
-        }
-    if radiation_col not in df_local.columns:
-        raise ValueError(
-            "Select a valid radiation column for the daytime/nighttime sensitivity analysis."
-        )
-    threshold = float(threshold)
-    out = df_local.copy()
-    out[tscol] = _to_datetime_1d(out[tscol])
-    radiation = pd.to_numeric(out[radiation_col], errors="coerce")
-    if mode_text.lower().startswith("day"):
-        keep = radiation > threshold
-        normalized_mode = "Daytime"
-    elif mode_text.lower().startswith("night"):
-        keep = radiation <= threshold
-        normalized_mode = "Nighttime"
-    else:
-        raise ValueError(f"Unknown diurnal subset: {mode_text}")
-    out = out.loc[keep.fillna(False)].copy()
-    if out.empty:
-        raise ValueError(
-            f"No {normalized_mode.lower()} rows remain using {radiation_col} and threshold {threshold:g}."
-        )
-    return out, {
-        "diurnal_mode": normalized_mode,
-        "daylight_variable": str(radiation_col),
-        "daylight_threshold": threshold,
-        "rows_before_diurnal_filter": int(len(df_local)),
-        "rows_after_diurnal_filter": int(len(out)),
-    }
-
-
-def _seasonal_climatology_predictions(y, timestamps, train_idx, test_idx,
-                                       window_days=7):
-    """Predict test observations from training-only day-of-year climatology."""
-    y = np.asarray(y, dtype=float).reshape(-1)
-    ts = pd.DatetimeIndex(pd.to_datetime(timestamps, errors="coerce"))
-    train_idx = np.asarray(train_idx, dtype=int)
-    test_idx = np.asarray(test_idx, dtype=int)
-    train_y = y[train_idx]
-    train_doy = ts[train_idx].dayofyear.to_numpy(dtype=int)
-    fallback = float(np.nanmean(train_y))
-    window = max(0, int(window_days))
-    out = []
-    for idx in test_idx:
-        doy = int(ts[idx].dayofyear)
-        distance = np.abs(train_doy - doy)
-        circular = np.minimum(distance, 366 - distance)
-        values = train_y[circular <= window]
-        values = values[np.isfinite(values)]
-        out.append(float(np.nanmean(values)) if values.size else fallback)
-    return np.asarray(out, dtype=float)
-
-
-def _baseline_skill_score(y_true, y_pred, baseline_pred):
-    """Return 1 - model MSE / baseline MSE on identical observations."""
-    yt = np.asarray(y_true, dtype=float)
-    yp = np.asarray(y_pred, dtype=float)
-    bp = np.asarray(baseline_pred, dtype=float)
-    valid = np.isfinite(yt) & np.isfinite(yp) & np.isfinite(bp)
-    if not np.any(valid):
-        return np.nan
-    model_mse = float(np.mean((yt[valid] - yp[valid]) ** 2))
-    baseline_mse = float(np.mean((yt[valid] - bp[valid]) ** 2))
-    if not np.isfinite(baseline_mse) or baseline_mse <= 0:
-        return np.nan
-    return float(1.0 - model_mse / baseline_mse)
 
 
 def _predictor_overlap_summary(df_period, predictors, target, tscol):
@@ -1486,86 +1170,36 @@ def _make_timestamp_aligned_validation_splits(model_timestamps, reference_timest
                                                strategy="Chronological holdout",
                                                test_ratio=0.20, n_folds=5,
                                                initial_train_fraction=0.50):
-    """Map validation windows from one ordered reference timeline to model rows.
+    """Map validation windows from a common reference timeline to model rows.
 
-    For blocked CV, the reference timeline defines exactly ``n_folds`` future
-    blocks. Model rows are then mapped to the same calendar cutoffs. This is
-    especially important for LSTM/H-LSTM, where gap-safe sequence construction
-    removes many candidate endpoints. Requested folds are never silently dropped:
-    either every fold is returned or a clear error is raised.
+    This keeps test dates identical for linear, tree, MLP, LSTM, and H-LSTM
+    models even though sequence construction removes early target rows.
     """
-    model_raw = pd.Series(model_timestamps)
-    ref_raw = pd.Series(reference_timestamps)
-    model_parsed = _to_datetime_1d(model_raw)
-    ref_parsed = _to_datetime_1d(ref_raw)
-    if model_parsed.isna().any():
+    model_ts = pd.DatetimeIndex(_to_datetime_1d(pd.Series(model_timestamps))).dropna()
+    ref_ts = pd.DatetimeIndex(_to_datetime_1d(pd.Series(reference_timestamps))).dropna()
+    if len(model_ts) != len(model_timestamps):
         raise ValueError("Model timestamps contain invalid values.")
-    if ref_parsed.isna().any():
-        raise ValueError("Reference timestamps contain invalid values.")
-
-    model_ts = pd.DatetimeIndex(model_parsed)
-    ref_ts = pd.DatetimeIndex(ref_parsed)
-    if not model_ts.is_monotonic_increasing or model_ts.has_duplicates:
-        raise ValueError("Model timestamps must be unique and sorted before validation.")
-    if not ref_ts.is_monotonic_increasing or ref_ts.has_duplicates:
-        raise ValueError("Reference timestamps must be unique and sorted before validation.")
-
     strategy = str(strategy or "Chronological holdout")
-    blocked = "Blocked time-series CV" in strategy or "Expanding-window" in strategy
     if "Random" in strategy:
-        return _make_validation_splits(
-            len(model_ts), strategy, test_ratio, n_folds,
-            initial_train_fraction=initial_train_fraction,
-        )
+        return _make_validation_splits(len(model_ts), strategy, test_ratio, n_folds)
 
     ref_splits = _make_validation_splits(
         len(ref_ts), strategy, test_ratio, n_folds,
         initial_train_fraction=initial_train_fraction,
     )
-    if blocked and len(ref_splits) != int(n_folds):
-        raise ValueError(
-            f"Requested {int(n_folds)} blocked folds, but the reference timeline "
-            f"produced {len(ref_splits)}. Reduce folds or use a longer period."
-        )
-
-    fold_starts = [ref_ts[int(ref_test[0])] for _, _, ref_test in ref_splits]
-    final_reference_end = ref_ts[int(ref_splits[-1][2][-1])]
     mapped = []
-    for pos, (fold, _, ref_test) in enumerate(ref_splits):
-        start = fold_starts[pos]
-        next_start = fold_starts[pos + 1] if pos + 1 < len(fold_starts) else None
+    for fold, _, ref_test in ref_splits:
+        start = ref_ts[int(ref_test[0])]
+        end = ref_ts[int(ref_test[-1])]
         train_idx = np.flatnonzero(model_ts < start)
-        if next_start is None:
-            test_mask = (model_ts >= start) & (model_ts <= final_reference_end)
-        else:
-            test_mask = (model_ts >= start) & (model_ts < next_start)
-        test_idx = np.flatnonzero(test_mask)
-        if len(train_idx) < 2:
-            raise ValueError(
-                f"Fold {int(fold)} has only {len(train_idx)} training rows after "
-                "timestamp alignment. Use an earlier analysis start or a smaller initial training fraction."
-            )
-        minimum_test_rows = 2 if blocked else 1
-        if len(test_idx) < minimum_test_rows:
-            raise ValueError(
-                f"Fold {int(fold)} has only {len(test_idx)} valid model row(s) after "
-                "sequence/gap alignment; at least 2 are required for blocked-CV metrics. "
-                "MeaningFlux will not silently drop or fabricate a requested fold. Reduce the "
-                "number of folds, shorten the sequence length, remove an overlap-limiting "
-                "predictor, or use a period with more contiguous data."
-            )
+        test_idx = np.flatnonzero((model_ts >= start) & (model_ts <= end))
+        if len(train_idx) < 2 or len(test_idx) < 1:
+            continue
         mapped.append((int(fold), train_idx.astype(int), test_idx.astype(int)))
-
-    if blocked:
-        expected_ids = list(range(1, int(n_folds) + 1))
-        actual_ids = [fold for fold, _, _ in mapped]
-        if len(mapped) != int(n_folds) or actual_ids != expected_ids:
-            raise ValueError(
-                f"Requested blocked folds {expected_ids}, but obtained {actual_ids}. "
-                "No fold reduction is allowed."
-            )
-    elif not mapped:
-        raise ValueError("No model rows fall inside the requested temporal validation window.")
+    if not mapped:
+        raise ValueError("No model rows fall inside the requested common temporal validation windows.")
+    if ("Blocked time-series CV" in strategy or "Expanding-window" in strategy) and len(mapped) < 2:
+        raise ValueError("Fewer than two common blocked-validation folds remain after sequence alignment.")
     return mapped
 
 def _fmt_time_range(values):
@@ -1576,52 +1210,6 @@ def _fmt_time_range(values):
         return f"{s.min().date()} to {s.max().date()}"
     except Exception:
         return "n/a"
-
-
-def _plot_gap_aware_line(ax, timestamps, values, *args, expected_step=None, **kwargs):
-    """Plot a time series without drawing lines across missing time intervals.
-
-    The first contiguous segment receives the requested legend label; subsequent
-    segments use the same style but no duplicate legend label.
-    """
-    ts = pd.DatetimeIndex(pd.to_datetime(pd.Series(timestamps), errors="coerce"))
-    vals = np.asarray(values, dtype=float).reshape(-1)
-    valid = (~ts.isna()) & np.isfinite(vals)
-    ts = ts[valid]
-    vals = vals[valid]
-    if len(ts) == 0:
-        return []
-    order = np.argsort(ts.asi8)
-    ts = ts[order]
-    vals = vals[order]
-    step = (
-        pd.Timedelta(expected_step)
-        if expected_step is not None and not pd.isna(expected_step)
-        else _infer_expected_timestep(ts)
-    )
-    if pd.isna(step) or step <= pd.Timedelta(0) or len(ts) < 2:
-        return ax.plot(ts, vals, *args, **kwargs)
-    tolerance = max(pd.Timedelta(seconds=1), step * 0.10)
-    diffs = pd.to_timedelta(np.diff(ts.asi8), unit="ns")
-    split_positions = np.flatnonzero(diffs > (step + tolerance)) + 1
-    segments = np.split(np.arange(len(ts)), split_positions)
-    label = kwargs.pop("label", None)
-    artists = []
-    shared_color = kwargs.get("color")
-    for seg_i, seg in enumerate(segments):
-        if len(seg) == 0:
-            continue
-        seg_kwargs = dict(kwargs)
-        if shared_color is not None:
-            seg_kwargs["color"] = shared_color
-        seg_kwargs["label"] = label if seg_i == 0 else "_nolegend_"
-        lines = ax.plot(ts[seg], vals[seg], *args, **seg_kwargs)
-        artists.extend(lines)
-        if shared_color is None and lines:
-            # Matplotlib advances the color cycle for every ax.plot call. Lock
-            # all later gap-separated segments to the first segment's color.
-            shared_color = lines[0].get_color()
-    return artists
 
 def _split_summary_from_frame(dfw, tscol, train_idx, test_idx, strategy, test_ratio):
     """Return a compact dictionary describing the train/test pool."""
@@ -1840,146 +1428,32 @@ def run_mlp(X, y, train_idx=None, test_idx=None, hidden=100,
     return y_ts.astype(float), pred.astype(float), m, (train_idx, test_idx)
 
 
-def _contiguous_sequence_arrays(work, feature_cols, target, seq_len, expected_step=None):
-    """Build fixed-cadence predictor sequences with endpoint-only targets.
+def _make_lstm_sequence_data(df_resampled, features, target, seq_len):
+    """Build contemporaneous multistep sequences without scaling.
 
-    Predictor values must be finite at every step of the sequence. The target is
-    required only at the final prediction timestamp. Missing target values at
-    earlier sequence steps therefore do not invalidate an otherwise usable
-    predictor window.
+    Each target y(t) is predicted from the previous ``seq_len`` predictor states,
+    including predictors at t. Scaling is deliberately deferred until after the
+    temporal split so the test period cannot influence preprocessing.
     """
-    work = work.copy().sort_index()
-    work = work[~work.index.duplicated(keep="last")]
-    if not isinstance(work.index, pd.DatetimeIndex):
-        work.index = pd.DatetimeIndex(pd.to_datetime(work.index, errors="coerce"))
-        work = work[~work.index.isna()].sort_index()
-
-    feature_cols = list(dict.fromkeys(list(feature_cols)))
-    required_cols = feature_cols + [target]
-    missing_cols = [c for c in required_cols if c not in work.columns]
-    if missing_cols:
-        raise ValueError("Sequence source is missing column(s): " + ", ".join(map(str, missing_cols)))
-
-    for c in required_cols:
-        work[c] = pd.to_numeric(work[c], errors="coerce")
-    work[required_cols] = work[required_cols].replace([np.inf, -np.inf], np.nan)
-
-    T = int(seq_len)
-    if T < 2:
-        raise ValueError("Sequence length must be at least 2.")
-    if len(work) < T:
-        raise ValueError("Not enough source timestamps for the selected sequence length.")
-
-    step = (
-        pd.Timedelta(expected_step)
-        if expected_step is not None and not pd.isna(expected_step)
-        else _infer_expected_timestep(work.index)
-    )
-    if pd.isna(step) or step <= pd.Timedelta(0):
-        raise ValueError("Could not infer a valid timestep for sequence construction.")
-    tolerance = max(pd.Timedelta(seconds=1), step * 1e-6)
-
-    xvals = work[feature_cols].to_numpy(dtype=float)
-    yvals = work[target].to_numpy(dtype=float)
-    idx = pd.DatetimeIndex(work.index)
-
+    cols = list(dict.fromkeys(list(features) + [target]))
+    work = df_resampled[cols].apply(pd.to_numeric, errors="coerce")
+    work = work.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    if len(work) < int(seq_len) + 2:
+        raise ValueError("Not enough complete observations for the selected LSTM sequence length.")
+    arr_x = work[features].to_numpy(dtype=float)
+    arr_y = work[target].to_numpy(dtype=float)
+    ts = pd.Index(work.index)
     Xs, ys, ts_out = [], [], []
-    rejected_gap_ts = []
-    rejected_target_ts = []
-    rejected_predictor_ts = []
-    candidate_windows = max(0, len(work) - T + 1)
-
+    T = int(seq_len)
     for t in range(T - 1, len(work)):
-        window_idx = idx[t - T + 1:t + 1]
-        diffs = pd.to_timedelta(np.diff(window_idx.asi8), unit="ns")
-        contiguous = bool(
-            len(diffs) == T - 1
-            and np.all(np.abs(diffs - step) <= tolerance)
-        )
-        if not contiguous:
-            rejected_gap_ts.append(idx[t])
-            continue
+        Xs.append(arr_x[t - T + 1:t + 1])
+        ys.append(arr_y[t])
+        ts_out.append(ts[t])
+    return np.asarray(Xs, dtype=float), np.asarray(ys, dtype=float), pd.Index(ts_out)
 
-        # The target is required only at the endpoint.
-        if not np.isfinite(yvals[t]):
-            rejected_target_ts.append(idx[t])
-            continue
-
-        x_window = xvals[t - T + 1:t + 1]
-        if not np.isfinite(x_window).all():
-            rejected_predictor_ts.append(idx[t])
-            continue
-
-        Xs.append(x_window)
-        ys.append(yvals[t])
-        ts_out.append(idx[t])
-
-    if not Xs:
-        raise ValueError(
-            "No valid sequences remain. Predictor windows must be complete and "
-            "consecutive, while the target must be observed at the endpoint. "
-            "Shorten the sequence, remove an overlap-limiting predictor, or "
-            "choose a better-covered period."
-        )
-
-    gap_info = _timestamp_gap_diagnostics(idx, expected_step=step)
-    complete_endpoint_rows = int(
-        np.sum(np.isfinite(yvals) & np.isfinite(xvals).all(axis=1))
-    )
-    diagnostics = {
-        "sequence_policy": (
-            "fixed-cadence predictor windows; predictors complete at every "
-            "sequence step; target required only at prediction endpoint; "
-            "windows crossing gaps rejected"
-        ),
-        "target_requirement": "endpoint only",
-        "predictor_requirement": "complete at every sequence step",
-        "expected_timestep": str(step),
-        "sequence_length": T,
-        "n_source_rows_before_sequences": int(len(work)),
-        # Backward-compatible field, now explicitly counting complete endpoint rows.
-        "n_complete_rows_before_sequences": complete_endpoint_rows,
-        "n_candidate_sequence_windows": int(candidate_windows),
-        "n_candidate_endpoint_targets": int(
-            np.sum(np.isfinite(yvals[T - 1:]))
-        ),
-        "n_valid_sequences": int(len(Xs)),
-        "n_rejected_gap_windows": int(len(rejected_gap_ts)),
-        "n_rejected_missing_endpoint_target": int(len(rejected_target_ts)),
-        "n_rejected_missing_predictor_windows": int(len(rejected_predictor_ts)),
-        "n_source_gaps": int(gap_info["n_gaps"]),
-        "max_source_interval": gap_info["max_interval"],
-        "max_source_interval_days": gap_info["max_interval_days"],
-        "first_valid_sequence": pd.Timestamp(ts_out[0]),
-        "last_valid_sequence": pd.Timestamp(ts_out[-1]),
-        "rejected_timestamps": pd.DatetimeIndex(rejected_gap_ts),
-        "rejected_missing_target_timestamps": pd.DatetimeIndex(rejected_target_ts),
-        "rejected_missing_predictor_timestamps": pd.DatetimeIndex(rejected_predictor_ts),
-    }
-    return (
-        np.asarray(Xs, dtype=float),
-        np.asarray(ys, dtype=float),
-        pd.DatetimeIndex(ts_out),
-        diagnostics,
-    )
-
-
-def _make_lstm_sequence_data(df_resampled, features, target, seq_len,
-                             return_diagnostics=False, expected_step=None):
-    """Build unscaled LSTM sequences without requiring prior target values."""
-    feature_cols = list(dict.fromkeys(list(features)))
-    cols = feature_cols + [target]
-    work = df_resampled[cols].copy()
-    for c in cols:
-        work[c] = pd.to_numeric(work[c], errors="coerce")
-    work = work.replace([np.inf, -np.inf], np.nan)
-    X, y, ts, diagnostics = _contiguous_sequence_arrays(
-        work, feature_cols, target, int(seq_len), expected_step=expected_step
-    )
-    return (X, y, ts, diagnostics) if return_diagnostics else (X, y, ts)
 
 def run_keras_lstm(X_seq, y, epochs=100, batch_size=32, hidden=96,
-                   learning_rate=0.001, dropout=0.0, gradient_clip=1.0,
+                   learning_rate=0.001, dropout=0.0,
                    train_idx=None, test_idx=None, progress_cb=None, info_cb=None,
                    seed=_GLOBAL_SEED):
     """Fit a true multistep Keras LSTM with leakage-free train-only scaling."""
@@ -2005,11 +1479,8 @@ def run_keras_lstm(X_seq, y, epochs=100, batch_size=32, hidden=96,
         LSTM(int(hidden), dropout=float(dropout)),
         Dense(1),
     ])
-    optimizer_kwargs = {"learning_rate": float(learning_rate)}
-    if gradient_clip is not None and float(gradient_clip) > 0:
-        optimizer_kwargs["clipnorm"] = float(gradient_clip)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(**optimizer_kwargs),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=float(learning_rate)),
         loss="mse",
     )
 
@@ -2035,131 +1506,118 @@ def run_keras_lstm(X_seq, y, epochs=100, batch_size=32, hidden=96,
 # ----------------- Hysteresis-aware helpers -----------------
 def _prepare_h_lstm_frame(df, predictors, target, gate_col, tscol, rs_mode,
                           min_coverage=_MIN_RESAMPLE_COVERAGE,
-                          sum_columns=None, mean_columns=None,
-                          coverage_relative_to_available_rows=False):
-    """Prepare an unscaled H-LSTM frame while preserving missing targets."""
+                          sum_columns=None, mean_columns=None):
+    """Prepare a clean, unscaled H-LSTM frame with target-aware aggregation."""
     cols_need = list(dict.fromkeys(list(predictors) + [gate_col, target]))
     base = df[cols_need + [tscol]].copy()
     base[tscol] = _to_datetime_1d(base[tscol])
     base = base.dropna(subset=[tscol])
     if rs_mode == 1:
-        base = _resample_df(
-            base, "D", tscol, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-            drop_complete_cases=False,
-        )
+        base = _resample_df(base, "D", tscol, min_coverage=min_coverage,
+                            sum_columns=sum_columns, mean_columns=mean_columns)
     elif rs_mode == 2:
-        base = _resample_df(
-            base, "W", tscol, min_coverage=min_coverage,
-            sum_columns=sum_columns, mean_columns=mean_columns,
-            coverage_relative_to_available_rows=coverage_relative_to_available_rows,
-            drop_complete_cases=False,
-        )
+        base = _resample_df(base, "W", tscol, min_coverage=min_coverage,
+                            sum_columns=sum_columns, mean_columns=mean_columns)
     else:
-        base = base.set_index(tscol).sort_index()
-        for c in cols_need:
-            base[c] = pd.to_numeric(base[c], errors="coerce")
-        base = base.replace([np.inf, -np.inf], np.nan)
+        base = base.set_index(tscol)
+        base = base.apply(pd.to_numeric, errors="coerce")
+        base = base.replace([np.inf, -np.inf], np.nan).dropna(how="any")
     return base
 
 
-def _make_seq_data(df_resampled, features, target, gate_col, seq_len,
-                   return_diagnostics=False, expected_step=None):
-    """Build H-LSTM sequences with endpoint-only targets and a gap-safe Δgate."""
-    feature_cols = list(dict.fromkeys(list(features) + [gate_col]))
-    base = df_resampled[feature_cols + [target]].copy()
-    for c in feature_cols + [target]:
-        base[c] = pd.to_numeric(base[c], errors="coerce")
-    base = base.replace([np.inf, -np.inf], np.nan).sort_index()
-    base = base[~base.index.duplicated(keep="last")]
-    if not isinstance(base.index, pd.DatetimeIndex):
-        base.index = pd.DatetimeIndex(pd.to_datetime(base.index, errors="coerce"))
-        base = base[~base.index.isna()].sort_index()
-    if len(base) < int(seq_len) + 1:
-        raise ValueError("Not enough source timestamps for the selected H-LSTM sequence length.")
+def _make_seq_data(df_resampled, features, target, gate_col, seq_len):
+    """Build unscaled H-LSTM sequences containing gate and current Δgate.
 
-    step = (
-        pd.Timedelta(expected_step)
-        if expected_step is not None and not pd.isna(expected_step)
-        else _infer_expected_timestep(base.index)
-    )
-    if pd.isna(step) or step <= pd.Timedelta(0):
-        raise ValueError("Could not infer a valid timestep for H-LSTM sequence construction.")
-    tolerance = max(pd.Timedelta(seconds=1), step * 1e-6)
-    timestamp_delta = base.index.to_series().diff()
-    dgate = base[gate_col].diff()
-    consecutive_from_previous = (timestamp_delta - step).abs() <= tolerance
-    dgate = dgate.where(consecutive_from_previous.to_numpy())
-    base["__DGATE__"] = dgate
-
-    # Do not delete rows with missing target. The shared sequence builder checks
-    # the target only at the final prediction timestamp.
-    work = base[feature_cols + ["__DGATE__", target]]
-    X, y, ts, diagnostics = _contiguous_sequence_arrays(
-        work,
-        feature_cols + ["__DGATE__"],
-        target,
-        int(seq_len),
-        expected_step=step,
-    )
-    diagnostics["gate_variable"] = gate_col
-    diagnostics["includes_delta_gate"] = True
-    diagnostics["delta_gate_requirement"] = (
-        "Δgate must be available at every sequence step; the first step therefore "
-        "uses the immediately preceding gate observation"
-    )
-    diagnostics["n_gate_delta_break_rows"] = int(base["__DGATE__"].isna().sum())
-    return (X, y, ts, diagnostics) if return_diagnostics else (X, y, ts)
-
-def run_hysteresis_lstm_sequences(X_seq, y, hidden=96, epochs=100,
-                                  batch_size=32, learning_rate=0.001,
-                                  dropout=0.0, gradient_clip=1.0,
-                                  train_idx=None, test_idx=None,
-                                  progress_cb=None, info_cb=None,
-                                  seed=_GLOBAL_SEED):
-    """Fit the hysteresis-aware sequence model with the same Keras LSTM used
-    by the standard LSTM.
-
-    ``X_seq`` already contains the common predictors plus the internally
-    calculated delta-gate channel. Architecture, optimizer, scaling, batch
-    size, epochs, dropout, gradient clipping, and seed are otherwise identical
-    to ``run_keras_lstm``. This isolates the added trajectory information as
-    the intended model difference.
+    The sequence ending at t includes predictor/gate information at t and predicts
+    the contemporaneous target y(t). Preprocessing is fitted inside each training
+    fold only by ``run_hysteresis_lstm``.
     """
-    return run_keras_lstm(
-        X_seq, y,
-        epochs=epochs,
-        batch_size=batch_size,
-        hidden=hidden,
-        learning_rate=learning_rate,
-        dropout=dropout,
-        gradient_clip=gradient_clip,
-        train_idx=train_idx,
-        test_idx=test_idx,
-        progress_cb=progress_cb,
-        info_cb=info_cb,
-        seed=seed,
-    )
+    work = df_resampled.copy()
+    feature_cols = list(dict.fromkeys(list(features) + [gate_col]))
+    work["__DGATE__"] = pd.to_numeric(work[gate_col], errors="coerce").diff()
+    cols = feature_cols + ["__DGATE__", target]
+    work = work[cols].apply(pd.to_numeric, errors="coerce")
+    work = work.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    if len(work) < int(seq_len) + 2:
+        raise ValueError("Not enough complete observations for the selected H-LSTM sequence length.")
+    xvals = work[feature_cols + ["__DGATE__"]].to_numpy(dtype=float)
+    yvals = work[target].to_numpy(dtype=float)
+    ts = pd.Index(work.index)
+    Xs, ys, ts_out = [], [], []
+    T = int(seq_len)
+    for t in range(T - 1, len(work)):
+        Xs.append(xvals[t - T + 1:t + 1])
+        ys.append(yvals[t])
+        ts_out.append(ts[t])
+    return np.asarray(Xs, dtype=float), np.asarray(ys, dtype=float), pd.Index(ts_out)
+
 
 def run_hysteresis_lstm(df_resampled, features, target, gate_col, seq_len=20,
-                        hidden=96, epochs=100, batch_size=32, learning_rate=0.001,
+                        hidden=96, epochs=100, learning_rate=0.001,
                         dropout=0.0, gradient_clip=1.0,
-                        train_idx=None, test_idx=None, progress_cb=None,
-                        info_cb=None, seed=_GLOBAL_SEED, expected_step=None):
-    """Compatibility wrapper that builds sequences once and fits H-LSTM."""
-    X, y, ts_all = _make_seq_data(
-        df_resampled, features, target, gate_col, int(seq_len),
-        expected_step=expected_step,
+                        train_idx=None, test_idx=None, progress_cb=None, info_cb=None,
+                        seed=_GLOBAL_SEED):
+    """Fit H-LSTM with train-only scaling and return predictions in original units."""
+    if not _HAS_TORCH:
+        raise RuntimeError("PyTorch not found. Install to enable H-LSTM.")
+    _set_reproducible_seed(seed)
+    X, y, ts_all = _make_seq_data(df_resampled, features, target, gate_col, int(seq_len))
+    if train_idx is None or test_idx is None:
+        train_idx, test_idx = _chronological_split(len(X), 0.20)
+
+    X_train_raw, X_test_raw = X[train_idx], X[test_idx]
+    y_train_raw, y_test_raw = y[train_idx], y[test_idx]
+    n_features = X.shape[2]
+    x_scaler = StandardScaler().fit(X_train_raw.reshape(-1, n_features))
+    y_scaler = StandardScaler().fit(y_train_raw.reshape(-1, 1))
+    X_train = x_scaler.transform(X_train_raw.reshape(-1, n_features)).reshape(X_train_raw.shape)
+    X_test = x_scaler.transform(X_test_raw.reshape(-1, n_features)).reshape(X_test_raw.shape)
+    y_train = y_scaler.transform(y_train_raw.reshape(-1, 1)).ravel()
+
+    X_tr = torch.tensor(X_train, dtype=torch.float32)
+    y_tr = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+    X_ts = torch.tensor(X_test, dtype=torch.float32)
+    ts_test = ts_all[test_idx]
+
+    class HysteresisLSTM(nn.Module):
+        def __init__(self, in_size, hidden_size=96, dropout_rate=0.0):
+            super().__init__()
+            self.lstm = nn.LSTM(in_size, hidden_size, batch_first=True)
+            self.dropout = nn.Dropout(float(dropout_rate))
+            self.fc = nn.Linear(hidden_size, 1)
+        def forward(self, x):
+            z, _ = self.lstm(x)
+            return self.fc(self.dropout(z[:, -1, :]))
+
+    model = HysteresisLSTM(
+        in_size=n_features, hidden_size=int(hidden), dropout_rate=float(dropout)
     )
-    yt, yp, model, split = run_hysteresis_lstm_sequences(
-        X, y, hidden=hidden, epochs=epochs, batch_size=batch_size,
-        learning_rate=learning_rate, dropout=dropout,
-        gradient_clip=gradient_clip, train_idx=train_idx,
-        test_idx=test_idx, progress_cb=progress_cb,
-        info_cb=info_cb, seed=seed,
-    )
-    return yt, yp, ts_all[np.asarray(split[1], dtype=int)], split
+    opt = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
+    loss_fn = nn.MSELoss()
+    if info_cb:
+        info_cb(f"Data: N={len(X)} | Train={len(train_idx)} | Test={len(test_idx)} | seq={seq_len} | F={n_features}\n")
+    t0 = time.time()
+    model.train()
+    for e in range(int(epochs)):
+        if _stop_event.is_set():
+            break
+        opt.zero_grad()
+        out = model(X_tr)
+        loss = loss_fn(out, y_tr)
+        loss.backward()
+        if float(gradient_clip) > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(gradient_clip))
+        opt.step()
+        if progress_cb:
+            progress_cb(e, float(loss.detach().cpu().item()))
+    if info_cb:
+        info_cb(f"{'Stopped' if _stop_event.is_set() else 'Training time'}: {time.time()-t0:.1f}s\n")
+
+    model.eval()
+    with torch.no_grad():
+        pred_scaled = model(X_ts).cpu().numpy().reshape(-1, 1)
+    pred = y_scaler.inverse_transform(pred_scaled).ravel()
+    return y_test_raw.astype(float), pred.astype(float), ts_test, (train_idx, test_idx)
 
 # =============================================================================
 #                 OPTIONAL PREDICTOR SCREENING ANALYTICS
@@ -2222,14 +1680,12 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
 
     # Top action bar
     bar = ttk.Frame(controls); bar.grid(sticky="ew", pady=(0, 8))
-    bar.columnconfigure(5, weight=1)
+    bar.columnconfigure(4, weight=1)
     btn_run = ttk.Button(bar, text="▶ Run model"); btn_stop = ttk.Button(bar, text="■ Stop", state="disabled")
     btn_open_it = ttk.Button(bar, text="Open in IT", state="disabled")
     btn_export = ttk.Button(bar, text="⤓ Save results")
-    btn_fig3b_defaults = ttk.Button(bar, text="Apply Fig 3B defaults")
     btn_run.grid(row=0, column=0, padx=(0,6)); btn_stop.grid(row=0, column=1, padx=(0,6))
     btn_open_it.grid(row=0, column=2, padx=(0,6)); btn_export.grid(row=0, column=3, padx=(0,6))
-    btn_fig3b_defaults.grid(row=0, column=4, padx=(0,6))
 
     # Run progress shown for every model. Epoch-based models also report a more
     # detailed ETA in the Training tab.
@@ -2256,21 +1712,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     # -------------------------------------------------------------------------
     default_ts = _guess_timestamp_column(cols)
     default_target = _guess_default_target(cols, timestamp_col=default_ts)
-    initial_predictors, _, _ = _recommended_predictors_for_target(
-        cols, default_target, timestamp_col=default_ts
-    )
-    preferred_gate_candidates = []
-    for gate_group in ("vpd", "humidity", "soil_water", "air_temperature", "soil_temperature"):
-        preferred_gate_candidates.extend(
-            _find_predictor_columns(
-                cols, gate_group, target=default_target,
-                timestamp_col=default_ts, max_count=3,
-            )
-        )
-    gate_default = next(
-        (c for c in preferred_gate_candidates if c in initial_predictors),
-        initial_predictors[0] if initial_predictors else (cols[0] if cols else ""),
-    )
 
     box_cfg = ttk.LabelFrame(controls, text="Step 1 — Model and parameters")
     box_cfg.grid(sticky="ew", pady=6)
@@ -2357,38 +1798,32 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     ttk.Label(seq_box, text="Epochs/fold").grid(row=0, column=4, sticky="w", padx=6, pady=6)
     ttk.Entry(seq_box, textvariable=epochs, width=8).grid(row=0, column=5, sticky="w", padx=6, pady=6)
 
-    # Shared Keras sequence-model training parameters. These settings are used
-    # identically by LSTM and H-LSTM so the only intended difference is the
-    # additional delta-gate input channel supplied to H-LSTM.
-    lstm_box = ttk.LabelFrame(box_cfg, text="Shared LSTM / H-LSTM training settings")
+    # Standard LSTM optimizer/training parameters
+    lstm_box = ttk.LabelFrame(box_cfg, text="LSTM training settings")
     lstm_batch_size = StringVar(lstm_box, value="32")
     lstm_learning_rate = StringVar(lstm_box, value="0.001")
     lstm_dropout = StringVar(lstm_box, value="0.0")
-    lstm_gradient_clip = StringVar(lstm_box, value="1.0")
     ttk.Label(lstm_box, text="Batch size").grid(row=0, column=0, sticky="w", padx=6, pady=6)
     ttk.Entry(lstm_box, textvariable=lstm_batch_size, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=6)
     ttk.Label(lstm_box, text="Learning rate").grid(row=0, column=2, sticky="w", padx=6, pady=6)
     ttk.Entry(lstm_box, textvariable=lstm_learning_rate, width=10).grid(row=0, column=3, sticky="w", padx=6, pady=6)
     ttk.Label(lstm_box, text="Dropout (0–0.9)").grid(row=0, column=4, sticky="w", padx=6, pady=6)
     ttk.Entry(lstm_box, textvariable=lstm_dropout, width=8).grid(row=0, column=5, sticky="w", padx=6, pady=6)
-    ttk.Label(lstm_box, text="Gradient clip (0 = off)").grid(row=1, column=0, sticky="w", padx=6, pady=(3,6))
-    ttk.Entry(lstm_box, textvariable=lstm_gradient_clip, width=8).grid(row=1, column=1, sticky="w", padx=6, pady=(3,6))
 
-    # Gate choice is made in Step 4. H-LSTM deliberately has no separate
-    # optimizer controls: it uses the same Keras training configuration above.
-    hlstm_box = ttk.LabelFrame(box_cfg, text="H-LSTM controlled difference")
-    gate_var = StringVar(hlstm_box, value=gate_default)
-    hlstm_learning_rate = lstm_learning_rate
-    hlstm_dropout = lstm_dropout
-    hlstm_gradient_clip = lstm_gradient_clip
-    tk.Message(
-        hlstm_box, width=360, fg="#444",
-        text=(
-            "H-LSTM uses the same Keras LSTM, optimizer, batch size, epochs, "
-            "dropout, gradient clipping, scaling, and seed as LSTM. Its only "
-            "additional input is Δgate (current gate minus previous gate)."
-        ),
-    ).grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+    # H-LSTM gate and optimizer parameters
+    hlstm_box = ttk.LabelFrame(box_cfg, text="H-LSTM gate and training settings")
+    gate_var = StringVar(hlstm_box, value=cols[0])
+    hlstm_learning_rate = StringVar(hlstm_box, value="0.001")
+    hlstm_dropout = StringVar(hlstm_box, value="0.0")
+    hlstm_gradient_clip = StringVar(hlstm_box, value="1.0")
+    ttk.Label(hlstm_box, text="Gate variable").grid(row=0, column=0, sticky="w", padx=6, pady=3)
+    ttk.OptionMenu(hlstm_box, gate_var, gate_var.get(), *cols).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
+    ttk.Label(hlstm_box, text="Learning rate").grid(row=1, column=0, sticky="w", padx=6, pady=(3,6))
+    ttk.Entry(hlstm_box, textvariable=hlstm_learning_rate, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=(3,6))
+    ttk.Label(hlstm_box, text="Dropout (0–0.9)").grid(row=1, column=2, sticky="w", padx=6, pady=(3,6))
+    ttk.Entry(hlstm_box, textvariable=hlstm_dropout, width=8).grid(row=1, column=3, sticky="w", padx=6, pady=(3,6))
+    ttk.Label(hlstm_box, text="Gradient clip (0 = off)").grid(row=2, column=0, sticky="w", padx=6, pady=(3,6))
+    ttk.Entry(hlstm_box, textvariable=hlstm_gradient_clip, width=10).grid(row=2, column=1, sticky="w", padx=6, pady=(3,6))
 
     model_frames = [linear_box, rf_box, mlp_box, seq_box, lstm_box, hlstm_box]
 
@@ -2406,21 +1841,13 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
             msg = "Feed-forward neural benchmark with fold-specific predictor and target scaling."
             mlp_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,6))
         elif m == "LSTM (Keras)":
-            msg = "Multistep Keras LSTM using the shared sequence-model training settings."
-            if Sequential is None:
-                msg += " TensorFlow/Keras is not available in this Python environment."
+            msg = "Multistep LSTM. Sequence length, architecture, optimizer, batch size, and dropout are user-controlled."
             seq_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,3))
             lstm_box.grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,6))
         else:
-            msg = (
-                "Controlled H-LSTM: the same Keras LSTM and training settings as LSTM, "
-                "with only Δgate added as an input channel. The gate must also be a common predictor."
-            )
-            if Sequential is None:
-                msg += " TensorFlow/Keras is not available in this Python environment."
+            msg = "H-LSTM adds the selected gate gradient internally. The gate must also be in the common predictor list."
             seq_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,3))
-            lstm_box.grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,3))
-            hlstm_box.grid(row=5, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,6))
+            hlstm_box.grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,6))
         model_settings_note.configure(text=msg)
 
     try:
@@ -2436,15 +1863,9 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     box_target.grid(sticky="ew", pady=6)
     box_target.columnconfigure(0, weight=1)
 
-    ttk.Label(box_target, text="Target flux / variable (y)").grid(row=0, column=0, sticky="w", padx=6, pady=(6,0))
+    ttk.Label(box_target, text="Target flux / variable (y)").grid(sticky="w", padx=6, pady=(6,0))
     y_var = StringVar(box_target, value=default_target)
-    ttk.OptionMenu(box_target, y_var, y_var.get(), *cols).grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0,4))
-    target_units = StringVar(box_target, value="")
-    target_sign_convention = StringVar(box_target, value="")
-    ttk.Label(box_target, text="Units (optional)").grid(row=2, column=0, sticky="w", padx=6, pady=3)
-    ttk.Entry(box_target, textvariable=target_units).grid(row=2, column=1, sticky="ew", padx=6, pady=3)
-    ttk.Label(box_target, text="Sign convention (optional)").grid(row=3, column=0, sticky="w", padx=6, pady=(3,6))
-    ttk.Entry(box_target, textvariable=target_sign_convention).grid(row=3, column=1, sticky="ew", padx=6, pady=(3,6))
+    ttk.OptionMenu(box_target, y_var, y_var.get(), *cols).grid(sticky="ew", padx=6, pady=(0,6))
 
     # -------------------------------------------------------------------------
     # Step 3: timestamp and temporal aggregation
@@ -2489,60 +1910,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         text="Aggregation overrides are optional comma-separated exact column names. Use them when automatic precipitation/management detection is wrong."
     ).grid(row=9, column=0, columnspan=4, sticky="ew", padx=6, pady=(3,6))
 
-    # Optional FC sensitivity analysis. The locked main Figure 3B setting is All.
-    ttk.Separator(box_time, orient="horizontal").grid(
-        row=10, column=0, columnspan=4, sticky="ew", padx=6, pady=(4,5)
-    )
-    ttk.Label(box_time, text="FC day/night sensitivity").grid(
-        row=11, column=0, sticky="w", padx=6, pady=3
-    )
-    diurnal_mode = StringVar(box_time, value="All observations (main Figure 3B)")
-    diurnal_options = [
-        "All observations (main Figure 3B)",
-        "Daytime sensitivity",
-        "Nighttime sensitivity",
-    ]
-    ttk.OptionMenu(
-        box_time, diurnal_mode, diurnal_mode.get(), *diurnal_options
-    ).grid(row=11, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
-
-    daylight_variable = StringVar(box_time, value=_guess_daylight_column(cols))
-    daylight_threshold = StringVar(box_time, value="10")
-    ttk.Label(box_time, text="Radiation classifier").grid(
-        row=12, column=0, sticky="w", padx=6, pady=3
-    )
-    daylight_menu = ttk.OptionMenu(
-        box_time, daylight_variable, daylight_variable.get(), *cols
-    )
-    daylight_menu.grid(row=12, column=1, columnspan=2, sticky="ew", padx=6, pady=3)
-    ttk.Label(box_time, text="Threshold").grid(
-        row=12, column=3, sticky="w", padx=6, pady=3
-    )
-    daylight_threshold_entry = ttk.Entry(
-        box_time, textvariable=daylight_threshold, width=8
-    )
-    daylight_threshold_entry.grid(row=13, column=3, sticky="w", padx=6, pady=(0,3))
-    tk.Message(
-        box_time, width=380, fg="#555",
-        text=(
-            "Optional FC/NEE sensitivity only. Filtering occurs before daily aggregation: "
-            "daytime = radiation > threshold; nighttime = radiation ≤ threshold. "
-            "The Figure 3B defaults reset this option to All observations."
-        ),
-    ).grid(row=13, column=0, columnspan=3, sticky="ew", padx=6, pady=(0,6))
-
-    def _update_diurnal_controls(*_):
-        active = not str(diurnal_mode.get()).lower().startswith("all")
-        state = "normal" if active else "disabled"
-        daylight_menu.configure(state=state)
-        daylight_threshold_entry.configure(state=state)
-
-    try:
-        diurnal_mode.trace_add("write", _update_diurnal_controls)
-    except Exception:
-        pass
-    _update_diurnal_controls()
-
     # -------------------------------------------------------------------------
     # Step 4: predictors and target-based presets
     # -------------------------------------------------------------------------
@@ -2570,86 +1937,16 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     )
     preset_msg.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0,4))
     auto_preset_var = tk.BooleanVar(box_predictors, value=True)
-    # This flag is activated only by Apply Fig 3B defaults. Normal literature-
-    # informed presets remain unchanged throughout the rest of MeaningFlux.
-    fig3b_predictor_mode = tk.BooleanVar(box_predictors, value=False)
     ttk.Checkbutton(
         box_predictors,
         text="Auto-select when target changes",
         variable=auto_preset_var
     ).grid(row=3, column=0, sticky="w", padx=6, pady=(0,6))
 
-    def _excluded_from_fig3b_auto_selection(column):
-        """Exclude only TS, SWC, and P families from the Fig 3B auto-preset.
-
-        Exact EC base-name matching avoids accidentally excluding PA, PPFD,
-        precipitation-independent variables, or other columns containing the
-        same letters. Users may still select these variables manually.
-        """
-        parts = _split_name_parts(column)
-        return bool(parts and parts[0] in {"TS", "SWC", "P"})
-
-    def _fig3b_keep_one_radiation(selected):
-        """Keep one primary radiation predictor in the Figure 3B auto-preset.
-
-        Preference: incoming shortwave/total PPFD or PAR, then net radiation,
-        then diffuse PPFD. The rule changes only automatic Figure 3B selection;
-        users may add another radiation variable manually afterward.
-        """
-        selected = list(selected)
-        radiation = []
-        for c in selected:
-            if (_find_predictor_columns([c], "radiation_shortwave", target=y_var.get(),
-                                        timestamp_col=ts_var.get(), max_count=1)
-                    or _find_predictor_columns([c], "radiation_net", target=y_var.get(),
-                                               timestamp_col=ts_var.get(), max_count=1)):
-                radiation.append(c)
-        if len(radiation) <= 1:
-            return selected
-
-        def _priority(c):
-            u = str(c).upper()
-            if any(k in u for k in ("SW_IN", "SWIN", "PPFD_IN", "PAR_IN")):
-                return 0
-            if ("PPFD" in u or "PAR" in u) and "DIF" not in u and "OUT" not in u:
-                return 1
-            if any(k in u for k in ("NETRAD", "RNET", "NET_RADIATION")) or u == "RN":
-                return 2
-            if "PPFD_DIF" in u or ("PPFD" in u and "DIF" in u):
-                return 3
-            return 4
-
-        keep = sorted(radiation, key=lambda c: (_priority(c), selected.index(c)))[0]
-        return [c for c in selected if c not in radiation or c == keep]
-
     def _apply_predict_preset(show_note=False):
-        selected, family, guide = _recommended_predictors_for_target(
-            cols, y_var.get(), timestamp_col=ts_var.get()
+        selected, family, guide = _apply_predictor_preset_to_listbox(
+            lb_X, cols, y_var.get(), timestamp_col=ts_var.get(), status_widget=preset_msg, select=True
         )
-        if fig3b_predictor_mode.get():
-            selected = [c for c in selected if not _excluded_from_fig3b_auto_selection(c)]
-            selected = _fig3b_keep_one_radiation(selected)
-            guide += (
-                "\n\nFigure 3B auto-selection: TS, SWC, and P columns are not "
-                "selected automatically. They remain available for manual selection."
-            )
-        lb_X.selection_clear(0, "end")
-        for i, c in enumerate(cols):
-            if c in selected:
-                lb_X.selection_set(i)
-        preset_msg.configure(text=guide)
-        if gate_var.get() not in selected:
-            gate_candidates = []
-            for gate_group in ("vpd", "humidity", "soil_water", "air_temperature", "soil_temperature"):
-                gate_candidates.extend(
-                    _find_predictor_columns(
-                        cols, gate_group, target=y_var.get(),
-                        timestamp_col=ts_var.get(), max_count=3,
-                    )
-                )
-            suggested_gate = next((c for c in gate_candidates if c in selected), None)
-            if suggested_gate is not None:
-                gate_var.set(suggested_gate)
         if show_note:
             messagebox.showinfo(
                 "Literature-informed predictor preset",
@@ -2668,26 +1965,11 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         text="Clear predictors",
         command=lambda: lb_X.selection_clear(0, "end")
     ).grid(row=3, column=2, sticky="e", padx=(0,6), pady=(0,6))
-    ttk.Label(
-        box_predictors,
-        text="H-LSTM gate / common fold reference",
-    ).grid(row=4, column=0, sticky="w", padx=6, pady=(3,3))
-    ttk.OptionMenu(
-        box_predictors, gate_var, gate_var.get(), *cols
-    ).grid(row=4, column=1, columnspan=2, sticky="ew", padx=6, pady=(3,3))
-    tk.Message(
-        box_predictors, width=380, fg="#555",
-        text=(
-            "For blocked model comparison, select the gate before running any model and keep it unchanged. "
-            "The gate must be in the common predictor list. MeaningFlux then defines all fold cutoffs from "
-            "the same gap-safe H-LSTM-eligible endpoint timeline."
-        ),
-    ).grid(row=5, column=0, columnspan=3, sticky="ew", padx=6, pady=(0,5))
     ttk.Button(
         box_predictors,
         text="Check overlap",
         command=lambda: _preview_predict_split(show_overlap_tab=True)
-    ).grid(row=6, column=0, columnspan=3, sticky="ew", padx=6, pady=(0,6))
+    ).grid(row=4, column=0, columnspan=3, sticky="ew", padx=6, pady=(0,6))
 
     def _on_predict_target_changed(*_):
         if auto_preset_var.get():
@@ -2735,13 +2017,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     initial_train_entry.grid(row=3, column=1, sticky="w", padx=6, pady=3)
     ttk.Button(box_split, text="Preview validation", command=lambda: _preview_predict_split()).grid(row=1, column=2, rowspan=3, sticky="e", padx=6, pady=3)
 
-    use_common_sequence_folds = tk.BooleanVar(box_split, value=False)
-    ttk.Checkbutton(
-        box_split,
-        text="Use common gap-safe sequence endpoints (required for Fig 3B)",
-        variable=use_common_sequence_folds,
-    ).grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(3,3))
-
     split_msg = tk.Message(
         box_split, width=380, fg="#444",
         text=(
@@ -2749,7 +2024,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
             "It trains only on earlier observations and tests consecutive future blocks."
         )
     )
-    split_msg.grid(row=5, column=0, columnspan=3, sticky="ew", padx=6, pady=(3,6))
+    split_msg.grid(row=4, column=0, columnspan=3, sticky="ew", padx=6, pady=(3,6))
 
     def _update_validation_control_states(*_):
         blocked = "Blocked time-series CV" in split_strategy.get()
@@ -2762,60 +2037,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     except Exception:
         pass
     _update_validation_control_states()
-
-    def _apply_fig3b_defaults():
-        """Apply locked manuscript defaults and the Fig 3B-only predictor rule."""
-        # Activate and apply the restricted auto-preset only for Figure 3B.
-        # Users may deliberately add excluded variables back afterward.
-        previous_gate = gate_var.get()
-        fig3b_predictor_mode.set(True)
-        _apply_predict_preset(show_note=False)
-        selected_now = [cols[i] for i in lb_X.curselection()]
-        if previous_gate in selected_now:
-            gate_var.set(previous_gate)
-        random_seed.set("42")
-        rs.set(1)  # Daily
-        diurnal_mode.set("All observations (main Figure 3B)")
-        min_coverage_pct.set("75%")
-        sum_override_text.set("")
-        mean_override_text.set("")
-        split_strategy.set("Blocked time-series CV (expanding window)")
-        use_common_sequence_folds.set(True)
-        cv_folds.set("5")
-        initial_train_fraction.set("50%")
-        test_fraction.set("20%")
-        linear_fit_intercept.set(True)
-        rf_n_estimators.set("300")
-        rf_min_samples_leaf.set("1")
-        rf_max_depth.set("")
-        rf_max_features.set("All")
-        rf_perm_repeats.set("10")
-        mlp_hidden.set("100")
-        mlp_max_iter.set("1500")
-        mlp_alpha.set("0.0001")
-        mlp_learning_rate.set("0.001")
-        mlp_activation.set("relu")
-        mlp_batch_size.set("auto")
-        seq_len.set("7")
-        hidden.set("96")
-        epochs.set("100")
-        lstm_batch_size.set("32")
-        lstm_learning_rate.set("0.001")
-        lstm_dropout.set("0.0")
-        hlstm_learning_rate.set("0.001")
-        hlstm_dropout.set("0.0")
-        hlstm_gradient_clip.set("1.0")
-        _update_validation_control_states()
-        messagebox.showinfo(
-            "Figure 3B defaults",
-            "Applied the locked Figure 3B model, aggregation, validation, and reproducibility defaults. "
-            "TS, SWC, and P were removed from automatic Figure 3B predictor selection only; "
-            "one primary radiation variable was retained; all variables remain available manually. "
-            "Sequence length is 7 days, and five folds use common gap-safe sequence endpoints across models. "
-            "The target and analysis period were not changed."
-        )
-
-    btn_fig3b_defaults.configure(command=_apply_fig3b_defaults)
 
     # Visible scientific workflow: model → target → data → predictors → validation.
     box_cfg.grid_configure(row=4)
@@ -2832,29 +2053,14 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
             if not sel_preview:
                 split_msg.configure(text="No predictors selected yet. Select/review predictors before previewing the split.")
                 return
-            diurnal_mode_preview = str(diurnal_mode.get() or "All observations")
-            diurnal_active_preview = not diurnal_mode_preview.lower().startswith("all")
-            if diurnal_active_preview and rs.get() != 1:
-                raise ValueError(
-                    "Daytime/nighttime sensitivity is defined as a daily product. Select Daily resolution."
-                )
-            daylight_col_preview = str(daylight_variable.get() or "").strip()
-            daylight_threshold_preview = float(daylight_threshold.get() or 10.0)
-            needed_preview = list(dict.fromkeys(
-                sel_preview + [tgt_preview, ts_preview] +
-                ([daylight_col_preview] if diurnal_active_preview else [])
-            ))
-            df_preview_period = _filter_analysis_period(
-                df[needed_preview], ts_preview,
-                analysis_start.get(), analysis_end.get(),
+            df_preview = _filter_analysis_period(
+                df[[*sel_preview, tgt_preview, ts_preview]],
+                ts_preview,
+                analysis_start.get(),
+                analysis_end.get(),
             )
-            selected_period_text = _fmt_time_range(df_preview_period[ts_preview])
-            n_period_rows = int(len(df_preview_period))
-            df_preview, diurnal_meta_preview = _apply_diurnal_subset(
-                df_preview_period, ts_preview, diurnal_mode_preview,
-                daylight_col_preview, daylight_threshold_preview,
-            )
-            n_subset_rows = int(len(df_preview))
+            selected_period_text = _fmt_time_range(df_preview[ts_preview])
+            n_period_rows = int(len(df_preview))
 
             # Predictor/target overlap diagnostics before resampling. This explains
             # why the model-ready period may be much shorter than the selected period.
@@ -2879,15 +2085,10 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                         row.get("note", ""),
                     ))
                 complete_rows = int(complete_mask_raw.sum())
-                coverage_pct = 100.0 * complete_rows / max(1, n_subset_rows)
-                subset_note = (
-                    f"{diurnal_meta_preview['diurnal_mode']} rows: {n_subset_rows:,}   |   "
-                    if diurnal_active_preview else ""
-                )
+                coverage_pct = 100.0 * complete_rows / max(1, n_period_rows)
                 overlap_msg.configure(
                     text=(
-                        f"Analysis rows: {n_period_rows:,}   |   {subset_note}"
-                        f"Complete target + predictor rows: {complete_rows:,} "
+                        f"Analysis rows: {n_period_rows:,}   |   Complete target + predictor rows: {complete_rows:,} "
                         f"({coverage_pct:.1f}%)   |   {limiting_text}"
                     )
                 )
@@ -2909,102 +2110,33 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 raise ValueError(
                     "A column cannot be forced to both SUM and MEAN: " + ", ".join(overlap_overrides)
                 )
-            dfw_preview_all, rs_label_preview = _resample_view(
+            dfw_preview, rs_label_preview = _resample_view(
                 df_preview, rs.get(), ts_preview,
                 min_coverage=coverage_preview,
                 sum_columns=sum_overrides_preview,
                 mean_columns=mean_overrides_preview,
-                coverage_relative_to_available_rows=diurnal_active_preview,
-                drop_complete_cases=False,
             )
-            dfw_preview_complete = (
-                dfw_preview_all[sel_preview + [tgt_preview]]
-                .apply(pd.to_numeric, errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .dropna(how="any")
-            )
-            preview_timestamps = pd.Index(dfw_preview_complete.index)
-            n_model_rows = len(dfw_preview_complete)
+            preview_timestamps = pd.Index(dfw_preview.index)
+            n_model_rows = len(dfw_preview)
             sequence_note = ""
-            gate_preview = str(gate_var.get() or "").strip()
-            blocked_preview = "Blocked time-series CV" in split_strategy.get()
-            use_common_preview = blocked_preview and bool(use_common_sequence_folds.get())
-            expected_preview_step = (
-                pd.Timedelta(days=1) if rs.get() == 1 else
-                pd.Timedelta(days=7) if rs.get() == 2 else None
-            )
-
-            common_endpoint_ts = None
-            if use_common_preview:
-                if not gate_preview or gate_preview not in sel_preview:
-                    raise ValueError(
-                        "For Figure 3B, select the H-LSTM gate and include that same variable "
-                        "in the common predictor list before previewing validation."
-                    )
-                needed_common = list(dict.fromkeys(
-                    sel_preview + [gate_preview, tgt_preview, ts_preview]
-                ))
-                df_h_common = _prepare_h_lstm_frame(
-                    df_preview[needed_common], sel_preview, tgt_preview,
-                    gate_preview, ts_preview, rs.get(),
-                    min_coverage=coverage_preview,
-                    sum_columns=sum_overrides_preview,
-                    mean_columns=mean_overrides_preview,
-                    coverage_relative_to_available_rows=diurnal_active_preview,
-                )
-                _, _, common_endpoint_ts, common_diag = _make_seq_data(
-                    df_h_common, sel_preview, tgt_preview, gate_preview,
-                    int(seq_len.get()), return_diagnostics=True,
-                    expected_step=expected_preview_step,
-                )
-                common_endpoint_ts = pd.Index(common_endpoint_ts)
-                preview_timestamps = common_endpoint_ts
-                n_model_rows = len(common_endpoint_ts)
-                sequence_note = (
-                    f" Figure 3B uses {n_model_rows:,} common gap-safe endpoints from "
-                    f"{int(seq_len.get())}-step predictor sequences; the target is required "
-                    "only at each endpoint, and all five models use these exact dates."
-                )
-            elif model.get() == "LSTM (Keras)":
-                _, yp, tsp = _make_lstm_sequence_data(
-                    dfw_preview_all, sel_preview, tgt_preview, int(seq_len.get()),
-                    expected_step=expected_preview_step,
-                )
+            if model.get() == "LSTM (Keras)":
+                Xp, yp, tsp = _make_lstm_sequence_data(dfw_preview, sel_preview, tgt_preview, int(seq_len.get()))
                 n_model_rows = len(yp)
                 preview_timestamps = pd.Index(tsp)
-                sequence_note = (
-                    f" LSTM uses {int(seq_len.get())}-step contiguous predictor sequences; "
-                    "the target is required only at the endpoint and gap-crossing windows are rejected."
-                )
+                sequence_note = f" Sequence construction removed the first {int(seq_len.get())-1} target rows."
             elif model.get() == "Hysteresis-Gate LSTM (H-LSTM)":
-                if not gate_preview or gate_preview not in sel_preview:
-                    raise ValueError("The H-LSTM gate must also be selected as a predictor.")
-                needed = list(dict.fromkeys(
-                    sel_preview + [gate_preview, tgt_preview, ts_preview]
-                ))
+                gate_preview = gate_var.get()
+                needed = list(dict.fromkeys(sel_preview + [gate_preview, tgt_preview, ts_preview]))
                 df_h_preview = _prepare_h_lstm_frame(
                     df_preview[needed], sel_preview, tgt_preview, gate_preview,
                     ts_preview, rs.get(), min_coverage=coverage_preview,
                     sum_columns=sum_overrides_preview,
                     mean_columns=mean_overrides_preview,
-                    coverage_relative_to_available_rows=diurnal_active_preview,
                 )
-                _, yp, tsp = _make_seq_data(
-                    df_h_preview, sel_preview, tgt_preview, gate_preview,
-                    int(seq_len.get()), expected_step=expected_preview_step,
-                )
+                Xp, yp, tsp = _make_seq_data(df_h_preview, sel_preview, tgt_preview, gate_preview, int(seq_len.get()))
                 n_model_rows = len(yp)
                 preview_timestamps = pd.Index(tsp)
-                sequence_note = (
-                    f" H-LSTM uses {int(seq_len.get())}-step contiguous predictor sequences and "
-                    f"Δ{gate_preview}; the target is required only at the endpoint."
-                )
-
-            validation_reference_timestamps = preview_timestamps
-            validation_reference_text = (
-                "common gap-safe sequence endpoints"
-                if use_common_preview else "the current model-ready timeline"
-            )
+                sequence_note = f" H-LSTM sequence construction uses {int(seq_len.get())} steps and Δ{gate_preview}."
 
             frac_preview = _parse_test_fraction(test_fraction.get(), 0.20)
             folds_preview = max(2, int(cv_folds.get() or 5))
@@ -3014,8 +2146,8 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 label="initial training fraction",
             )
             validation_splits = _make_timestamp_aligned_validation_splits(
-                preview_timestamps, validation_reference_timestamps,
-                split_strategy.get(), frac_preview, folds_preview,
+                preview_timestamps, pd.Index(dfw_preview.index), split_strategy.get(),
+                frac_preview, folds_preview,
                 initial_train_fraction=initial_fraction_preview,
             )
             first_fold, first_tr, first_ts = validation_splits[0]
@@ -3037,17 +2169,8 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
             }
             preview_text = _split_summary_text(info_preview)
             if len(validation_splits) > 1:
-                preview_text += (
-                    f"\nValidation folds: {len(validation_splits)} expanding, non-overlapping future blocks "
-                    f"defined from {validation_reference_text}."
-                )
+                preview_text += f"\nValidation folds: {len(validation_splits)} expanding, non-overlapping future blocks."
             preview_text += sequence_note
-            if diurnal_active_preview:
-                preview_text += (
-                    f"\nDiurnal sensitivity: {diurnal_meta_preview['diurnal_mode']} using "
-                    f"{daylight_col_preview} threshold {daylight_threshold_preview:g}; "
-                    f"{n_subset_rows:,} subdaily rows retained before daily aggregation."
-                )
             preview_text += "\nResampling: " + _resampling_summary(
                 sel_preview + [tgt_preview], min_coverage=coverage_preview,
                 sum_columns=sum_overrides_preview,
@@ -3174,17 +2297,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         fg="#444"
     ).pack(anchor="w", pady=(10,0))
 
-    baseline_msg = tk.Message(
-        box_metrics,
-        width=720,
-        text=(
-            "Baseline benchmark: run a model to compare it with the training-fold mean "
-            "and a training-only ±7-day seasonal climatology on the exact same test dates."
-        ),
-        fg="#0B4F9C",
-    )
-    baseline_msg.pack(anchor="w", pady=(12, 0))
-
     # Training monitor
     monitor = TrainingMonitor(results_tabs["Training"])
 
@@ -3199,7 +2311,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     btn_ecdf = ttk.Button(row1, text="Plot metric ECDF")
     btn_export_fig2c = ttk.Button(row1, text="Export Fig 2C")
     btn_export_publication = ttk.Button(row1, text="Export publication outputs")
-    btn_export_fig3b = ttk.Button(row1, text="Export Fig 3B results")
+    btn_export_fig3b = ttk.Button(row1, text="Export Fig 3B comparison")
     btn_export_it = ttk.Button(row1, text="Save ML–IT bridge")
     btn_clear   = ttk.Button(row1, text="Clear runs")
     btn_refresh.pack(side="left")
@@ -3216,7 +2328,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         width=900,
         text=(
             "Compare tab guide:\n"
-            "• Each row is one model run. Repeated runs of the same model are allowed and can be selected together. Lower RMSE/nRMSE/MAE and higher R² indicate better predictive skill.\n"
+            "• Each row is one model run. Lower RMSE/nRMSE/MAE and higher R² indicate better predictive skill.\n"
             "• Overlay selected predictions to see when models fail or diverge.\n"
             "• Open in IT sends the aligned drivers, observations, predictions, residuals, and train/test labels directly to the Information Theory toolbox.\n"
             "• Plot metric ECDF shows the distribution of model skill across all runs in this session. This is useful when comparing many models, sites, or time windows rather than relying on one average value."
@@ -3225,7 +2337,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
     ).pack(fill="x", padx=8, pady=(0,6))
 
     cols_cmp = ("when", "model", "resample", "split", "folds", "n_train", "n_test", "target", "features", "rmse", "nrmse", "mae", "r2")
-    tree = ttk.Treeview(tab_cmp, columns=cols_cmp, show="headings", height=6, selectmode="extended")
+    tree = ttk.Treeview(tab_cmp, columns=cols_cmp, show="headings", height=6)
     for c in cols_cmp:
         tree.heading(c, text=c.upper())
         tree.column(c, width=110 if c not in ("features",) else 360, anchor="w")
@@ -3242,8 +2354,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
 
     # ----------------------- handles -----------------------
     handles = dict(
-        model=model, lb_X=lb_X, y_var=y_var, target_units=target_units,
-        target_sign_convention=target_sign_convention, ts_var=ts_var,
+        model=model, lb_X=lb_X, y_var=y_var, ts_var=ts_var,
         rs=rs, gate_var=gate_var, seq_len=seq_len, hidden=hidden, epochs=epochs,
         random_seed=random_seed,
         linear_fit_intercept=linear_fit_intercept,
@@ -3273,7 +2384,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         ax_resid=ax_resid, can_resid=can_resid,
         ax_imp=ax_imp, can_imp=can_imp,
         lbl_rmse=lbl_rmse, lbl_nrmse=lbl_nrmse, lbl_mae=lbl_mae, lbl_r2=lbl_r2,
-        baseline_msg=baseline_msg, interp_text=interp_text,
+        interp_text=interp_text,
         monitor=monitor, results_notebook=results, tab_feat=results_tabs["Feature Importance"], tab_series=results_tabs["Series"],
         # compare
         runs=[], cmp_metric=cmp_metric, tree=tree,
@@ -3281,18 +2392,12 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
         ax_ecdf=ax_ecdf, can_ecdf=can_ecdf,
         # config
         split_strategy=split_strategy, test_fraction=test_fraction, cv_folds=cv_folds,
-        initial_train_fraction=initial_train_fraction,
-        use_common_sequence_folds=use_common_sequence_folds,
-        split_msg=split_msg,
+        initial_train_fraction=initial_train_fraction, split_msg=split_msg,
         analysis_start=analysis_start, analysis_end=analysis_end, use_full_period=use_full_period,
         min_coverage_pct=min_coverage_pct,
         sum_override_text=sum_override_text,
         mean_override_text=mean_override_text,
-        diurnal_mode=diurnal_mode,
-        daylight_variable=daylight_variable,
-        daylight_threshold=daylight_threshold,
-        predictor_preset_message=preset_msg, auto_preset=auto_preset_var,
-        fig3b_predictor_mode=fig3b_predictor_mode
+        predictor_preset_message=preset_msg, auto_preset=auto_preset_var
     )
 
     # ----------------------- IT bridge export logic -----------------------
@@ -3349,9 +2454,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "residual_column": resid_col,
                 "features": ", ".join(r.get("features", [])),
                 "resample": r.get("resample"),
-                "diurnal_mode": r.get("diurnal_mode"),
-                "daylight_variable": r.get("daylight_variable"),
-                "daylight_threshold": r.get("daylight_threshold"),
                 "resampling_summary": r.get("resampling_summary"),
                 "min_resample_coverage": r.get("min_resample_coverage"),
                 "sum_override_columns": ", ".join(r.get("sum_override_columns", [])),
@@ -3359,42 +2461,25 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "split_strategy": r.get("split_strategy"),
                 "test_fraction": r.get("test_fraction"),
                 "n_folds": r.get("n_folds"),
-                "requested_n_folds": r.get("requested_n_folds"),
-                "validation_reference": r.get("validation_reference"),
-                "comparison_gate_variable": r.get("comparison_gate_variable"),
-                "use_common_sequence_folds": r.get("use_common_sequence_folds"),
                 "n_train_min": r.get("n_train_min"),
                 "n_train_max": r.get("n_train_max"),
                 "n_test": r.get("n_test"),
                 "analysis_start": r.get("analysis_start"),
                 "analysis_end": r.get("analysis_end"),
-                "diurnal_mode": r.get("diurnal_mode"),
-                "daylight_variable": r.get("daylight_variable"),
-                "daylight_threshold": r.get("daylight_threshold"),
                 "train_period": (r.get("split_info") or {}).get("train_period"),
                 "test_period": (r.get("split_info") or {}).get("test_period"),
                 "rmse": r.get("rmse"),
                 "nrmse_p5_p95": r.get("nrmse_p5_p95"),
                 "mae": r.get("mae"),
                 "r2": r.get("r2"),
-                "skill_vs_training_mean": r.get("skill_vs_training_mean"),
-                "skill_vs_seasonal_climatology": r.get("skill_vs_seasonal_climatology"),
-                "folds_beating_training_mean": r.get("folds_beating_training_mean"),
-                "folds_beating_seasonal_climatology": r.get("folds_beating_seasonal_climatology"),
+                "n_folds": r.get("n_folds"),
                 "sequence_length": r.get("sequence_length"),
                 "hidden_size": r.get("hidden_size"),
                 "epochs": r.get("epochs"),
                 "gate_variable": r.get("gate_variable"),
                 "random_seed": r.get("random_seed"),
                 "scaling": r.get("scaling"),
-                "missing_data_handling": r.get("missing_data_handling"),
-                "outlier_handling": r.get("outlier_handling"),
-                "diurnal_cycle_handling": r.get("diurnal_cycle_handling"),
                 "model_parameters": str(r.get("model_parameters")),
-                "skill_vs_training_mean": r.get("skill_vs_training_mean"),
-                "skill_vs_seasonal_climatology": r.get("skill_vs_seasonal_climatology"),
-                "folds_beating_training_mean": r.get("folds_beating_training_mean"),
-                "folds_beating_seasonal_climatology": r.get("folds_beating_seasonal_climatology"),
                 "software_versions": str(_software_versions()),
             })
 
@@ -3528,7 +2613,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                            .resample("D").mean().dropna(how="any").reset_index())
                 x = to_plot["timestamp"]
                 x_label = "Date"
-                title_note = "daily means shown; lines break at temporal gaps"
+                title_note = "daily means shown"
             else:
                 to_plot = plot_df.copy()
                 x = np.arange(len(to_plot))
@@ -3548,19 +2633,8 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 return
 
             fig, ax = plt.subplots(figsize=(6.6, 3.3))
-            if use_daily:
-                _plot_gap_aware_line(
-                    ax, x, to_plot["y_true"].values, linewidth=1.8,
-                    marker="o", markersize=2, label=f"Observed {target}",
-                )
-                _plot_gap_aware_line(
-                    ax, x, to_plot["y_pred"].values, linewidth=1.8,
-                    linestyle="--", marker="o", markersize=2,
-                    label=f"Predicted {target} ({model_label})",
-                )
-            else:
-                ax.plot(x, to_plot["y_true"].values, linewidth=1.8, label=f"Observed {target}")
-                ax.plot(x, to_plot["y_pred"].values, linewidth=1.8, linestyle="--", label=f"Predicted {target} ({model_label})")
+            ax.plot(x, to_plot["y_true"].values, linewidth=1.8, label=f"Observed {target}")
+            ax.plot(x, to_plot["y_pred"].values, linewidth=1.8, linestyle="--", label=f"Predicted {target} ({model_label})")
             ax.set_title(f"C. Held-out {target} prediction")
             ax.set_xlabel(x_label)
             ax.set_ylabel(_target_axis_label(target))
@@ -3606,10 +2680,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "mae": mae,
                 "r2": r2,
                 "n_folds": r.get("n_folds"),
-                "requested_n_folds": r.get("requested_n_folds"),
-                "validation_reference": r.get("validation_reference"),
-                "comparison_gate_variable": r.get("comparison_gate_variable"),
-                "use_common_sequence_folds": r.get("use_common_sequence_folds"),
                 "sequence_length": r.get("sequence_length"),
                 "hidden_size": r.get("hidden_size"),
                 "epochs": r.get("epochs"),
@@ -3702,7 +2772,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                            .resample("D").mean().dropna(how="any").reset_index())
                 x = ts_plot["timestamp"]
                 x_label = "Date"
-                time_note = "Daily means shown with temporal gaps left unconnected; metrics use all held-out/out-of-fold samples."
+                time_note = "Daily means shown; metrics use all held-out/out-of-fold samples."
             else:
                 ts_plot = work[["timestamp", "y_true", "y_pred"]].copy()
                 x = np.arange(len(ts_plot))
@@ -3710,19 +2780,8 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 time_note = "Held-out/out-of-fold samples shown."
 
             fig_ts, ax_ts = plt.subplots(figsize=(6.8, 3.5))
-            if has_real_time:
-                _plot_gap_aware_line(
-                    ax_ts, x, ts_plot["y_true"], linewidth=1.6,
-                    marker="o", markersize=2, label=f"Observed {target}",
-                )
-                _plot_gap_aware_line(
-                    ax_ts, x, ts_plot["y_pred"], linewidth=1.6,
-                    linestyle="--", marker="o", markersize=2,
-                    label=f"Predicted {target}",
-                )
-            else:
-                ax_ts.plot(x, ts_plot["y_true"], linewidth=1.6, label=f"Observed {target}")
-                ax_ts.plot(x, ts_plot["y_pred"], linewidth=1.6, linestyle="--", label=f"Predicted {target}")
+            ax_ts.plot(x, ts_plot["y_true"], linewidth=1.6, label=f"Observed {target}")
+            ax_ts.plot(x, ts_plot["y_pred"], linewidth=1.6, linestyle="--", label=f"Predicted {target}")
             ax_ts.set_title(f"Observed and predicted {target}")
             ax_ts.set_xlabel(x_label)
             ax_ts.set_ylabel(_target_axis_label(target))
@@ -3790,14 +2849,7 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "rmse": rmse, "nrmse_p5_p95": nrmse, "mae": mae, "r2": r2,
                 "n_test": len(work), "observed_p05": metric_values["observed_p05"],
                 "observed_p95": metric_values["observed_p95"],
-                "skill_vs_training_mean": r.get("skill_vs_training_mean"),
-                "skill_vs_seasonal_climatology": r.get("skill_vs_seasonal_climatology"),
-                "folds_beating_training_mean": r.get("folds_beating_training_mean"),
-                "folds_beating_seasonal_climatology": r.get("folds_beating_seasonal_climatology"),
             }]).to_csv(data_dir / "metrics.csv", index=False)
-            baseline_metrics_df = r.get("baseline_metrics_df")
-            if baseline_metrics_df is not None and not getattr(baseline_metrics_df, "empty", True):
-                baseline_metrics_df.to_csv(data_dir / "baseline_metrics.csv", index=False)
             fold_metrics_df = r.get("fold_metrics_df")
             if fold_metrics_df is not None and not getattr(fold_metrics_df, "empty", True):
                 fold_metrics_df.to_csv(data_dir / "fold_metrics.csv", index=False)
@@ -3813,17 +2865,10 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "model": rr.get("model"),
                 "resample": rr.get("resample"),
                 "target": rr.get("target"),
-                "diurnal_mode": rr.get("diurnal_mode"),
-                "daylight_variable": rr.get("daylight_variable"),
-                "daylight_threshold": rr.get("daylight_threshold"),
                 "features": ", ".join(rr.get("features", [])),
                 "split_strategy": rr.get("split_strategy"),
                 "test_fraction": rr.get("test_fraction"),
                 "n_folds": rr.get("n_folds"),
-                "requested_n_folds": rr.get("requested_n_folds"),
-                "validation_reference": rr.get("validation_reference"),
-                "comparison_gate_variable": rr.get("comparison_gate_variable"),
-                "use_common_sequence_folds": rr.get("use_common_sequence_folds"),
                 "n_train_min": rr.get("n_train_min"),
                 "n_train_max": rr.get("n_train_max"),
                 "n_test": rr.get("n_test"),
@@ -3831,10 +2876,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "nrmse_p5_p95": rr.get("nrmse_p5_p95"),
                 "mae": rr.get("mae"),
                 "r2": rr.get("r2"),
-                "skill_vs_training_mean": rr.get("skill_vs_training_mean"),
-                "skill_vs_seasonal_climatology": rr.get("skill_vs_seasonal_climatology"),
-                "folds_beating_training_mean": rr.get("folds_beating_training_mean"),
-                "folds_beating_seasonal_climatology": rr.get("folds_beating_seasonal_climatology"),
                 "sequence_length": rr.get("sequence_length"),
                 "hidden_size": rr.get("hidden_size"),
                 "epochs": rr.get("epochs"),
@@ -3858,10 +2899,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "split_strategy": r.get("split_strategy"),
                 "test_fraction": r.get("test_fraction"),
                 "n_folds": r.get("n_folds"),
-                "requested_n_folds": r.get("requested_n_folds"),
-                "validation_reference": r.get("validation_reference"),
-                "comparison_gate_variable": r.get("comparison_gate_variable"),
-                "use_common_sequence_folds": r.get("use_common_sequence_folds"),
                 "n_train_min": r.get("n_train_min"),
                 "n_train_max": r.get("n_train_max"),
                 "n_test": r.get("n_test"),
@@ -3875,10 +2912,6 @@ def _build_predict_tab(parent_notebook, df, inputname_site):
                 "nrmse_p5_p95": nrmse,
                 "mae": mae,
                 "r2": r2,
-                "skill_vs_training_mean": r.get("skill_vs_training_mean"),
-                "skill_vs_seasonal_climatology": r.get("skill_vs_seasonal_climatology"),
-                "folds_beating_training_mean": r.get("folds_beating_training_mean"),
-                "folds_beating_seasonal_climatology": r.get("folds_beating_seasonal_climatology"),
                 "observed_p05": metric_values["observed_p05"],
                 "observed_p95": metric_values["observed_p95"],
                 "sequence_length": r.get("sequence_length"),
@@ -3912,17 +2945,15 @@ Predictors: {', '.join(r.get('features', []))}
 
 Contents
 - figures/: manuscript-ready PNG (600 dpi), PDF, and SVG outputs
-- data/: predictions, residuals, model/baseline metrics, fold diagnostics, feature importance when available, session summary, and ML-IT bridge
+- data/: predictions, residuals, metrics, feature importance when available, session summary, and ML-IT bridge
 - metadata/: run settings and reproducibility information
 - publication_manifest.csv: index of exported files
 
 Notes
 - Predictive metrics are calculated only from held-out/out-of-fold predictions in original target units.
 - nRMSE is RMSE divided by the observed 5th–95th percentile range.
-- Baselines use the same held-out dates: the training-fold mean and a training-only ±7-day day-of-year climatology.
-- Daytime/nighttime products are optional FC sensitivities and are not used by the locked main Figure 3B preset.
 - Neural-model scalers are fitted inside each training fold and predictions are inverse-transformed before evaluation.
-- The time-series figure may show daily means for readability; lines are broken at temporal gaps and this does not change the reported metrics.
+- The time-series figure may show daily means for readability; this does not change the reported metrics.
 - Panel letters are intentionally omitted so figures can be assembled in PowerPoint, Illustrator, or LaTeX.
 """
             (package_dir / "README.txt").write_text(readme, encoding="utf-8")
@@ -3943,134 +2974,47 @@ Notes
         return list(runs)
 
     def _build_common_timestamp_comparison():
-        """Build the final five-model Figure 3B comparison on common test dates."""
-        runs = _runs_selected_or_all()
-        expected_models = {
-            "Linear Regression",
-            "Random Forest",
-            "Neural Network (MLP)",
-            "LSTM (Keras)",
-            "Hysteresis-Gate LSTM (H-LSTM)",
-        }
-        model_names = [str(r.get("model")) for r in runs]
-        if len(model_names) != len(set(model_names)):
-            raise ValueError(
-                "Figure 3B requires exactly one run per model. Remove duplicate runs "
-                "or select one row for each model."
-            )
-        if set(model_names) != expected_models:
-            missing = sorted(expected_models - set(model_names))
-            extra = sorted(set(model_names) - expected_models)
-            details = []
-            if missing:
-                details.append("missing: " + ", ".join(missing))
-            if extra:
-                details.append("unexpected: " + ", ".join(extra))
-            raise ValueError(
-                "Figure 3B requires Linear Regression, Random Forest, MLP, LSTM, "
-                "and H-LSTM (" + "; ".join(details) + ")."
-            )
+        """Align model predictions on identical held-out timestamps.
 
+        Sequence models lose early rows, so manuscript comparisons must use the
+        timestamp intersection rather than each model's native sample count.
+        """
+        runs = _runs_selected_or_all()
+        if len(runs) < 2:
+            raise ValueError("Run or select at least two models for a common-timestamp comparison.")
         targets = {str(r.get("target")) for r in runs}
         resolutions = {str(r.get("resample")) for r in runs}
         strategies = {str(r.get("split_strategy")) for r in runs}
         feature_sets = {tuple(r.get("features", [])) for r in runs}
-        analysis_periods = {
-            (str(r.get("analysis_start")), str(r.get("analysis_end"))) for r in runs
-        }
-        selected_periods = {
-            (str(r.get("selected_analysis_start")), str(r.get("selected_analysis_end")))
-            for r in runs
-        }
+        analysis_periods = {(str(r.get("analysis_start")), str(r.get("analysis_end"))) for r in runs}
         fold_counts = {int(r.get("n_folds") or 1) for r in runs}
-        requested_fold_counts = {int(r.get("requested_n_folds") or r.get("n_folds") or 1) for r in runs}
-        validation_references = {str(r.get("validation_reference")) for r in runs}
-        comparison_gates = {str(r.get("comparison_gate_variable")) for r in runs}
-        common_sequence_flags = {bool(r.get("use_common_sequence_folds")) for r in runs}
         initial_fractions = {r.get("initial_train_fraction") for r in runs}
         coverage_settings = {r.get("min_resample_coverage") for r in runs}
         sum_overrides = {tuple(r.get("sum_override_columns", [])) for r in runs}
         mean_overrides = {tuple(r.get("mean_override_columns", [])) for r in runs}
         seeds = {int(r.get("random_seed")) for r in runs}
-        units = {str(r.get("target_units", "not provided")) for r in runs}
-        sign_conventions = {
-            str(r.get("target_sign_convention", "not provided")) for r in runs
-        }
-        diurnal_settings = {
-            (
-                str(r.get("diurnal_mode") or "All observations"),
-                str(r.get("daylight_variable")),
-                str(r.get("daylight_threshold")),
-            )
-            for r in runs
-        }
-
-        checks = [
-            (len(targets) == 1, "the same target"),
-            (len(resolutions) == 1, "the same temporal aggregation"),
-            (len(strategies) == 1, "the same validation strategy"),
-            (len(feature_sets) == 1, "the same ordered predictor list"),
-            (len(analysis_periods) == 1 and len(selected_periods) == 1,
-             "the same analysis period"),
-            (len(fold_counts) == 1 and len(requested_fold_counts) == 1 and
-             len(initial_fractions) == 1 and len(validation_references) == 1 and
-             len(comparison_gates) == 1 and common_sequence_flags == {True},
-             "identical requested/used folds, common endpoint validation reference, gate, and initial training fraction"),
-            (len(coverage_settings) == 1 and len(sum_overrides) == 1 and len(mean_overrides) == 1,
-             "identical aggregation settings"),
-            (len(seeds) == 1, "the same random seed"),
-            (len(units) == 1 and len(sign_conventions) == 1,
-             "the same target units and sign convention"),
-            (len(diurnal_settings) == 1,
-             "the same daytime/nighttime setting"),
-        ]
-        failed = [label for ok, label in checks if not ok]
-        if failed:
-            raise ValueError("Figure 3B requires " + ", ".join(failed) + " for every model.")
-        used_folds = next(iter(fold_counts))
-        requested_fold_count = next(iter(requested_fold_counts))
-        if requested_fold_count != 5 or used_folds != 5:
-            raise ValueError(
-                f"Figure 3B requires exactly 5 requested and 5 completed folds; "
-                f"found requested={requested_fold_count}, completed={used_folds}."
-            )
-        diurnal_mode_for_export = next(iter(diurnal_settings))[0]
-        if not diurnal_mode_for_export.lower().startswith("all"):
-            raise ValueError(
-                "The locked main Figure 3B uses All observations. Daytime/nighttime runs "
-                "belong in the supplementary FC sensitivity analysis."
-            )
+        if len(targets) != 1:
+            raise ValueError("Figure 3B comparison requires the same target within a site.")
+        if len(resolutions) != 1:
+            raise ValueError("Figure 3B comparison requires the same temporal aggregation for every model.")
+        if len(strategies) != 1:
+            raise ValueError("Figure 3B comparison requires the same validation strategy for every model.")
+        if len(feature_sets) != 1:
+            raise ValueError("Figure 3B comparison requires exactly the same ordered predictor list for every model.")
+        if len(analysis_periods) != 1:
+            raise ValueError("Figure 3B comparison requires the same analysis period for every model.")
+        if len(fold_counts) != 1 or len(initial_fractions) != 1:
+            raise ValueError("Figure 3B comparison requires identical fold count and initial training fraction.")
+        if len(coverage_settings) != 1 or len(sum_overrides) != 1 or len(mean_overrides) != 1:
+            raise ValueError("Figure 3B comparison requires identical aggregation coverage and overrides.")
+        if len(seeds) != 1:
+            raise ValueError("Figure 3B comparison requires the same base random seed for every model.")
         if any("Random" in strategy for strategy in strategies):
-            raise ValueError(
-                "Use blocked time-series CV or chronological holdout; random splits "
-                "are exploratory only."
-            )
-
-        lstm_run = next(r for r in runs if r.get("model") == "LSTM (Keras)")
-        hlstm_run = next(r for r in runs if r.get("model") == "Hysteresis-Gate LSTM (H-LSTM)")
-        lstm_params = dict(lstm_run.get("model_parameters") or {})
-        hlstm_params = dict(hlstm_run.get("model_parameters") or {})
-        controlled_keys = (
-            "sequence_length", "hidden_size", "epochs", "batch_size",
-            "learning_rate", "dropout", "gradient_clip", "framework", "shuffle",
-        )
-        mismatched_sequence_settings = [
-            key for key in controlled_keys
-            if lstm_params.get(key) != hlstm_params.get(key)
-        ]
-        if mismatched_sequence_settings:
-            raise ValueError(
-                "For Figure 3B, LSTM and H-LSTM must use identical training settings. "
-                "Mismatched: " + ", ".join(mismatched_sequence_settings) + "."
-            )
-        gate_for_comparison = hlstm_run.get("gate_variable")
-        if not gate_for_comparison or gate_for_comparison not in hlstm_run.get("features", []):
-            raise ValueError(
-                "The H-LSTM gate must be included in the common predictor list."
-            )
+            raise ValueError("Use blocked time-series CV or chronological holdout for Figure 3B; random splits are exploratory only.")
 
         common = None
         model_specs = []
+        used_tags = {}
         for idx, r in enumerate(runs):
             pdf = r.get("pred_df")
             if pdf is None or getattr(pdf, "empty", True) or "timestamp" not in pdf.columns:
@@ -4080,17 +3024,16 @@ Notes
             d["y_true"] = pd.to_numeric(d["y_true"], errors="coerce")
             d["y_pred"] = pd.to_numeric(d["y_pred"], errors="coerce")
             d = d.dropna(subset=["timestamp", "y_true", "y_pred"])
+            # There should be one OOF prediction per timestamp. Aggregate defensively.
             agg = {"y_true": "mean", "y_pred": "mean"}
             if "fold" in d.columns:
                 agg["fold"] = "first"
-            if idx == 0:
-                if "pred_training_mean" in d.columns:
-                    agg["pred_training_mean"] = "mean"
-                if "pred_seasonal_climatology" in d.columns:
-                    agg["pred_seasonal_climatology"] = "mean"
             d = d.groupby("timestamp", as_index=False).agg(agg)
 
-            tag = _safe_model_tag(r.get("model", f"model_{idx+1}"))
+            base_tag = _safe_model_tag(r.get("model", f"model_{idx+1}"))
+            count = used_tags.get(base_tag, 0) + 1
+            used_tags[base_tag] = count
+            tag = base_tag if count == 1 else f"{base_tag}_{count}"
             obs_col = f"observed_{tag}"
             pred_col = f"predicted_{tag}"
             fold_col = f"fold_{tag}"
@@ -4098,346 +3041,89 @@ Notes
             if "fold" in d.columns:
                 rename["fold"] = fold_col
             d = d.rename(columns=rename)
-            keep = ["timestamp", obs_col, pred_col]
-            if idx == 0:
-                keep.extend([
-                    c for c in ("pred_training_mean", "pred_seasonal_climatology")
-                    if c in d.columns
-                ])
-            if fold_col in d.columns:
-                keep.append(fold_col)
+            keep = ["timestamp", obs_col, pred_col] + ([fold_col] if fold_col in d.columns else [])
             common = d[keep] if common is None else common.merge(d[keep], on="timestamp", how="inner")
             model_specs.append((r, tag, obs_col, pred_col, fold_col))
 
         if common is None or common.empty:
-            raise ValueError("The five models have no common held-out timestamps.")
+            raise ValueError("The selected models have no common held-out timestamps.")
         common = common.sort_values("timestamp").reset_index(drop=True)
-        first_run = model_specs[0][0]
         first_obs = model_specs[0][2]
         common = common.rename(columns={first_obs: "observed"})
         for _, _, obs_col, _, _ in model_specs[1:]:
-            diff = np.nanmax(
-                np.abs(common[obs_col].to_numpy(dtype=float) - common["observed"].to_numpy(dtype=float))
-            )
-            if np.isfinite(diff) and diff > 1e-8:
-                raise ValueError("Observed target values differ among models on common timestamps.")
-            common = common.drop(columns=[obs_col])
-
-        fold_cols = [spec[4] for spec in model_specs if spec[4] in common.columns]
-        if len(fold_cols) != len(model_specs):
-            raise ValueError("Every Figure 3B model must contain fold assignments.")
-        fold_reference = pd.to_numeric(common[fold_cols[0]], errors="coerce")
-        for fold_col in fold_cols[1:]:
-            fold_other = pd.to_numeric(common[fold_col], errors="coerce")
-            mismatch = ~(fold_reference.eq(fold_other) | (fold_reference.isna() & fold_other.isna()))
-            if bool(mismatch.any()):
-                raise ValueError(
-                    "Validation fold assignments differ among models. Clear the runs and rerun "
-                    "all five models without changing the validation configuration."
-                )
-        common.insert(1, "fold", fold_reference.astype("Int64"))
-        common = common.drop(columns=fold_cols)
-        common_fold_ids = sorted(common["fold"].dropna().astype(int).unique().tolist())
-        expected_fold_ids = [1, 2, 3, 4, 5]
-        if common_fold_ids != expected_fold_ids:
-            raise ValueError(
-                f"Common-timestamp comparison must retain folds {expected_fold_ids}; "
-                f"found {common_fold_ids}. Rerun all models with the final validation code."
-            )
-        common_fold_counts = common.groupby("fold").size()
-        too_small = common_fold_counts[common_fold_counts < 2]
-        if not too_small.empty:
-            raise ValueError(
-                "At least two common observations are required in every fold to calculate R². "
-                "Insufficient folds: " + ", ".join(
-                    f"{int(k)} (n={int(v)})" for k, v in too_small.items()
-                )
-            )
-
-        common_test_start = pd.to_datetime(common["timestamp"], errors="coerce").min()
-        common_test_end = pd.to_datetime(common["timestamp"], errors="coerce").max()
-        common_gap_info = _timestamp_gap_diagnostics(common["timestamp"])
-        pooled_obs_p05, pooled_obs_p95 = np.nanpercentile(
-            pd.to_numeric(common["observed"], errors="coerce"), [5, 95]
-        )
-        pooled_obs_range = float(pooled_obs_p95 - pooled_obs_p05)
-        if "pred_training_mean" not in common.columns or "pred_seasonal_climatology" not in common.columns:
-            raise ValueError(
-                "The selected runs do not contain the final baseline predictions. Clear old runs and rerun all five models."
-            )
-        common_training_mean_metrics = _metric_bundle(
-            common["observed"], common["pred_training_mean"]
-        )
-        common_seasonal_metrics = _metric_bundle(
-            common["observed"], common["pred_seasonal_climatology"]
-        )
-
-        selected_analysis_start = first_run.get("selected_analysis_start")
-        selected_analysis_end = first_run.get("selected_analysis_end")
-        analysis_period_mode = first_run.get("analysis_period_mode", "not recorded")
-        target_units = first_run.get("target_units", "not provided")
-        target_sign = first_run.get("target_sign_convention", "not provided")
+            if obs_col in common.columns:
+                diff = np.nanmax(np.abs(common[obs_col].to_numpy() - common["observed"].to_numpy()))
+                if np.isfinite(diff) and diff > 1e-8:
+                    raise ValueError("Observed target values differ among model exports on common timestamps.")
+                common = common.drop(columns=[obs_col])
 
         metric_rows = []
         common_fold_rows = []
         metadata_rows = []
         for r, tag, _, pred_col, fold_col in model_specs:
-            counts = dict(r.get("data_counts") or {})
             m = _metric_bundle(common["observed"], common[pred_col])
             metric_rows.append({
-                "site": str(inputname_site),
-                "target": r.get("target"),
-                "target_units": target_units,
-                "target_sign_convention": target_sign,
-                "diurnal_mode": r.get("diurnal_mode"),
-                "daylight_variable": r.get("daylight_variable"),
-                "daylight_threshold": r.get("daylight_threshold"),
-                "model": r.get("model"),
-                "model_tag": tag,
-                "requested_n_folds": r.get("requested_n_folds"),
-                "completed_n_folds": r.get("n_folds"),
-                "validation_reference": r.get("validation_reference"),
-                "comparison_gate_variable": r.get("comparison_gate_variable"),
-                "use_common_sequence_folds": r.get("use_common_sequence_folds"),
-                "analysis_period_mode": analysis_period_mode,
-                "selected_analysis_start": selected_analysis_start,
-                "selected_analysis_end": selected_analysis_end,
-                "model_ready_start": r.get("model_ready_start"),
-                "model_ready_end": r.get("model_ready_end"),
-                "common_test_start": common_test_start,
-                "common_test_end": common_test_end,
-                "n_common": int(len(common)),
-                "common_test_gaps": int(common_gap_info["n_gaps"]),
-                "common_test_max_interval_days": common_gap_info["max_interval_days"],
-                "input_rows": counts.get("input_rows"),
-                "selected_period_rows": counts.get("selected_period_rows"),
-                "resampled_period_rows": counts.get("resampled_period_rows"),
-                "complete_case_rows": counts.get("complete_case_rows"),
-                "model_ready_rows": counts.get("model_ready_rows"),
-                "rmse": m["rmse"],
-                "nrmse_p5_p95": _nrmse_with_reference_range(
-                    m["rmse"], pooled_obs_p05, pooled_obs_p95
-                ),
-                "mae": m["mae"],
-                "r2": m["r2"],
-                "training_mean_rmse": common_training_mean_metrics["rmse"],
-                "training_mean_nrmse_p5_p95": _nrmse_with_reference_range(
-                    common_training_mean_metrics["rmse"], pooled_obs_p05, pooled_obs_p95
-                ),
-                "training_mean_r2": common_training_mean_metrics["r2"],
-                "seasonal_climatology_rmse": common_seasonal_metrics["rmse"],
-                "seasonal_climatology_nrmse_p5_p95": _nrmse_with_reference_range(
-                    common_seasonal_metrics["rmse"], pooled_obs_p05, pooled_obs_p95
-                ),
-                "seasonal_climatology_r2": common_seasonal_metrics["r2"],
-                "skill_vs_training_mean": _baseline_skill_score(
-                    common["observed"], common[pred_col], common["pred_training_mean"]
-                ),
-                "skill_vs_seasonal_climatology": _baseline_skill_score(
-                    common["observed"], common[pred_col], common["pred_seasonal_climatology"]
-                ),
-                "observed_p05": float(pooled_obs_p05),
-                "observed_p95": float(pooled_obs_p95),
-                "nrmse_reference_range": pooled_obs_range,
-                "nrmse_reference": "pooled common observed P5-P95 range",
-                "sequence_policy": r.get("sequence_policy"),
-                "expected_timestep": r.get("expected_timestep"),
-                "n_candidate_sequence_windows": r.get("n_candidate_sequence_windows"),
-                "n_valid_sequences": r.get("n_valid_sequences"),
-                "n_rejected_gap_windows": r.get("n_rejected_gap_windows", 0),
-                "n_rejected_missing_endpoint_target": r.get(
-                    "n_rejected_missing_endpoint_target", 0
-                ),
-                "n_rejected_missing_predictor_windows": r.get(
-                    "n_rejected_missing_predictor_windows", 0
-                ),
-                "target_requirement": r.get("target_requirement"),
-                "predictor_requirement": r.get("predictor_requirement"),
+                "site": str(inputname_site), "target": r.get("target"),
+                "model": r.get("model"), "model_tag": tag,
+                "n_common": len(common), "rmse": m["rmse"],
+                "nrmse_p5_p95": m["nrmse_p5_p95"], "mae": m["mae"], "r2": m["r2"],
+                "observed_p05": m["observed_p05"], "observed_p95": m["observed_p95"],
             })
-
-            original_folds = r.get("fold_metrics_df")
-            for fold, g in common.groupby("fold"):
-                fm = _metric_bundle(g["observed"], g[pred_col])
-                mean_fm = _metric_bundle(g["observed"], g["pred_training_mean"])
-                seasonal_fm = _metric_bundle(g["observed"], g["pred_seasonal_climatology"])
-                original = None
-                if original_folds is not None and not getattr(original_folds, "empty", True):
-                    match = original_folds[pd.to_numeric(original_folds["fold"], errors="coerce") == int(fold)]
-                    if not match.empty:
-                        original = match.iloc[0]
-                def _orig(name, default=np.nan):
-                    return original.get(name, default) if original is not None else default
-                common_fold_rows.append({
-                    "site": str(inputname_site),
-                    "target": r.get("target"),
-                    "model": r.get("model"),
-                    "fold": int(fold),
-                    "train_start": _orig("train_start", pd.NaT),
-                    "train_end": _orig("train_end", pd.NaT),
-                    "n_train_model": _orig("n_train"),
-                    "model_test_start": _orig("test_start", pd.NaT),
-                    "model_test_end": _orig("test_end", pd.NaT),
-                    "n_test_model": _orig("n_test"),
-                    "common_fold_start": g["timestamp"].min(),
-                    "common_fold_end": g["timestamp"].max(),
-                    "n_common_fold": int(len(g)),
-                    "n_rejected_gap_windows_train": _orig("n_rejected_gap_windows_train", 0),
-                    "n_rejected_gap_windows_test": _orig("n_rejected_gap_windows_test", 0),
-                    "rmse": fm["rmse"],
-                    "nrmse_p5_p95": _nrmse_with_reference_range(
-                        fm["rmse"], pooled_obs_p05, pooled_obs_p95
-                    ),
-                    "mae": fm["mae"],
-                    "r2": fm["r2"],
-                    "training_mean_rmse": mean_fm["rmse"],
-                    "training_mean_nrmse_p5_p95": _nrmse_with_reference_range(
-                        mean_fm["rmse"], pooled_obs_p05, pooled_obs_p95
-                    ),
-                    "seasonal_climatology_rmse": seasonal_fm["rmse"],
-                    "seasonal_climatology_nrmse_p5_p95": _nrmse_with_reference_range(
-                        seasonal_fm["rmse"], pooled_obs_p05, pooled_obs_p95
-                    ),
-                    "skill_vs_training_mean": _baseline_skill_score(
-                        g["observed"], g[pred_col], g["pred_training_mean"]
-                    ),
-                    "skill_vs_seasonal_climatology": _baseline_skill_score(
-                        g["observed"], g[pred_col], g["pred_seasonal_climatology"]
-                    ),
-                    "beats_training_mean": bool(fm["rmse"] < mean_fm["rmse"]),
-                    "beats_seasonal_climatology": bool(fm["rmse"] < seasonal_fm["rmse"]),
-                    "nrmse_reference_range": pooled_obs_range,
-                })
-
+            if fold_col in common.columns:
+                for fold, g in common.groupby(fold_col):
+                    fm = _metric_bundle(g["observed"], g[pred_col])
+                    common_fold_rows.append({
+                        "site": str(inputname_site), "target": r.get("target"),
+                        "model": r.get("model"), "fold": int(fold),
+                        "n_common_fold": len(g), "test_start": g["timestamp"].min(),
+                        "test_end": g["timestamp"].max(), "rmse": fm["rmse"],
+                        "nrmse_p5_p95": fm["nrmse_p5_p95"], "mae": fm["mae"], "r2": fm["r2"],
+                    })
             metadata_rows.append({
-                "site": str(inputname_site),
-                "target": r.get("target"),
-                "target_units": target_units,
-                "target_sign_convention": target_sign,
-                "diurnal_mode": r.get("diurnal_mode"),
-                "daylight_variable": r.get("daylight_variable"),
-                "daylight_threshold": r.get("daylight_threshold"),
-                "model": r.get("model"),
-                "features": ", ".join(r.get("features", [])),
-                "gate_variable": r.get("gate_variable"),
-                "resample": r.get("resample"),
+                "site": str(inputname_site), "target": r.get("target"), "model": r.get("model"),
+                "features": ", ".join(r.get("features", [])), "resample": r.get("resample"),
                 "resampling_summary": r.get("resampling_summary"),
                 "min_resample_coverage": r.get("min_resample_coverage"),
                 "sum_override_columns": ", ".join(r.get("sum_override_columns", [])),
                 "mean_override_columns": ", ".join(r.get("mean_override_columns", [])),
-                "split_strategy": r.get("split_strategy"),
-                "requested_n_folds": r.get("requested_n_folds"),
-                "completed_n_folds": r.get("n_folds"),
-                "validation_reference": r.get("validation_reference"),
-                "comparison_gate_variable": r.get("comparison_gate_variable"),
-                "use_common_sequence_folds": r.get("use_common_sequence_folds"),
-                "initial_train_fraction": r.get("initial_train_fraction"),
-                "random_seed": r.get("random_seed"),
-                "analysis_period_mode": r.get("analysis_period_mode", analysis_period_mode),
-                "requested_analysis_start": r.get("analysis_start"),
-                "requested_analysis_end": r.get("analysis_end"),
-                "selected_analysis_start": r.get("selected_analysis_start"),
-                "selected_analysis_end": r.get("selected_analysis_end"),
-                "model_ready_start": r.get("model_ready_start"),
-                "model_ready_end": r.get("model_ready_end"),
-                "common_test_start": common_test_start,
-                "common_test_end": common_test_end,
-                "n_common_test_observations": int(len(common)),
-                "common_test_gaps": int(common_gap_info["n_gaps"]),
-                "common_test_max_interval_days": common_gap_info["max_interval_days"],
-                **counts,
-                "sequence_length": r.get("sequence_length"),
-                "sequence_policy": r.get("sequence_policy"),
-                "expected_timestep": r.get("expected_timestep"),
-                "n_candidate_sequence_windows": r.get("n_candidate_sequence_windows"),
-                "n_valid_sequences": r.get("n_valid_sequences"),
-                "n_rejected_gap_windows": r.get("n_rejected_gap_windows", 0),
-                "n_rejected_missing_endpoint_target": r.get(
-                    "n_rejected_missing_endpoint_target", 0
-                ),
-                "n_rejected_missing_predictor_windows": r.get(
-                    "n_rejected_missing_predictor_windows", 0
-                ),
-                "target_requirement": r.get("target_requirement"),
-                "predictor_requirement": r.get("predictor_requirement"),
-                "n_source_gaps": r.get("n_source_gaps", 0),
-                "max_source_interval_days": r.get("max_source_interval_days"),
-                "hidden_size": r.get("hidden_size"),
-                "epochs": r.get("epochs"),
-                "batch_size": r.get("batch_size"),
+                "split_strategy": r.get("split_strategy"), "n_folds": r.get("n_folds"),
+                "analysis_start": r.get("analysis_start"), "analysis_end": r.get("analysis_end"),
+                "sequence_length": r.get("sequence_length"), "hidden_size": r.get("hidden_size"),
+                "epochs": r.get("epochs"), "batch_size": r.get("batch_size"),
+                "gate_variable": r.get("gate_variable"), "random_seed": r.get("random_seed"),
                 "scaling": r.get("scaling"),
-                "missing_data_handling": r.get("missing_data_handling"),
-                "outlier_handling": r.get("outlier_handling"),
                 "model_parameters": str(r.get("model_parameters")),
+                "initial_train_fraction": r.get("initial_train_fraction"),
                 "software_versions": str(_software_versions()),
             })
-
-        coverage_df = first_run.get("variable_coverage_df")
-        if coverage_df is None or getattr(coverage_df, "empty", True):
-            coverage_df = pd.DataFrame()
-        else:
-            coverage_df = coverage_df.copy()
-            hlstm_run = next(r for r in runs if r.get("model") == "Hysteresis-Gate LSTM (H-LSTM)")
-            gate = hlstm_run.get("gate_variable")
-            if gate and "variable" in coverage_df.columns:
-                coverage_df.loc[coverage_df["variable"] == gate, "role"] = "predictor; H-LSTM gate"
-            coverage_df.insert(0, "site", str(inputname_site))
-            coverage_df.insert(1, "target", first_run.get("target"))
-            coverage_df.insert(2, "resample", first_run.get("resample"))
-            coverage_df.insert(3, "selected_analysis_start", selected_analysis_start)
-            coverage_df.insert(4, "selected_analysis_end", selected_analysis_end)
-
-        return (
-            common,
-            pd.DataFrame(metric_rows),
-            pd.DataFrame(common_fold_rows),
-            pd.DataFrame(metadata_rows),
-            coverage_df,
-        )
+        return common, pd.DataFrame(metric_rows), pd.DataFrame(common_fold_rows), pd.DataFrame(metadata_rows)
 
     def _export_fig3b_comparison():
         from tkinter.filedialog import asksaveasfilename
         try:
-            common, metrics_df, folds_df, metadata_df, coverage_df = _build_common_timestamp_comparison()
+            common, metrics_df, folds_df, metadata_df = _build_common_timestamp_comparison()
         except Exception as exc:
-            messagebox.showerror("Figure 3B results", str(exc))
+            messagebox.showerror("Figure 3B comparison", str(exc))
             return
-
         target = str(metrics_df["target"].iloc[0]) if not metrics_df.empty else "target"
         site = str(inputname_site).replace(".csv", "") if inputname_site else "site"
         path = asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            title="Save Figure 3B results (choose base filename)",
+            defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+            title="Save Figure 3B common-timestamp comparison",
             initialfile=f"Figure3B_{site}_{target}_common_predictions.csv".replace(" ", "_"),
         )
         if not path:
             return
         base = path[:-4] if path.lower().endswith(".csv") else path
-        paths = {
-            "predictions": base + ".csv",
-            "metrics": base + "_metrics.csv",
-            "fold metrics": base + "_fold_metrics.csv",
-            "metadata": base + "_metadata.csv",
-            "coverage": base + "_coverage.csv",
-        }
-        common.to_csv(paths["predictions"], index=False)
-        metrics_df.to_csv(paths["metrics"], index=False)
-        folds_df.to_csv(paths["fold metrics"], index=False)
-        metadata_df.to_csv(paths["metadata"], index=False)
-        coverage_df.to_csv(paths["coverage"], index=False)
-
-        import os
-        save_folder = os.path.dirname(os.path.abspath(paths["predictions"]))
-        file_list = "\n".join(f"• {os.path.basename(v)}" for v in paths.values())
+        common.to_csv(base + ".csv", index=False)
+        metrics_df.to_csv(base + "_metrics.csv", index=False)
+        folds_df.to_csv(base + "_fold_metrics.csv", index=False)
+        metadata_df.to_csv(base + "_metadata.csv", index=False)
         messagebox.showinfo(
-            "Figure 3B results",
-            f"Saved to:\n{save_folder}\n\nFiles:\n{file_list}\n\n"
-            "Periods, data retention, fold train/test windows, gap-safe sequence counts, "
-            "metrics, and variable coverage are included."
+            "Figure 3B comparison",
+            "Saved common-timestamp predictions and companion metric, fold, and metadata files."
         )
 
-    handles["build_fig3b_results"] = _build_common_timestamp_comparison
-    handles["export_fig3b_results"] = _export_fig3b_comparison
     btn_export_fig3b.configure(command=_export_fig3b_comparison)
 
     # ----------------------- Compare tab logic -----------------------
@@ -4457,7 +3143,7 @@ Notes
         ax_cmp.cla()
         met = handles["cmp_metric"].get()
         if runs:
-            labels = [_comparison_run_label(rr, i) for i, rr in enumerate(runs)]
+            labels = [f'{i}:{rr["model"].split()[0]}' for i, rr in enumerate(runs)]
             vals = [rr["rmse"] if met=="RMSE" else rr.get("nrmse_p5_p95", np.nan) if met=="nRMSE" else rr["mae"] if met=="MAE" else rr["r2"] for rr in runs]
             xpos = np.arange(len(vals))
             ax_cmp.bar(xpos, vals)
@@ -4513,10 +3199,8 @@ Notes
             return
         ax_ov.cla()
         drew_true = False
-        for selected_pos, iid in enumerate(sel_items):
-            run_index = int(iid)
-            r = handles["runs"][run_index]
-            comparison_label = _comparison_run_label(r, run_index)
+        for iid in sel_items:
+            r = handles["runs"][int(iid)]
             pdf = r.get("pred_df")
             if pdf is None or pdf.empty: continue
             # x-axis
@@ -4530,22 +3214,10 @@ Notes
                 x = np.arange(len(pdf)); xlab = "Index"
             # draw true once
             if not drew_true and "y_true" in pdf.columns:
-                if "timestamp" in pdf.columns:
-                    _plot_gap_aware_line(
-                        ax_ov, x, pdf["y_true"].values,
-                        label="True", alpha=0.8, marker="o", markersize=2,
-                    )
-                else:
-                    ax_ov.plot(x, pdf["y_true"].values, label="True", alpha=0.8)
+                ax_ov.plot(x, pdf["y_true"].values, label="True", alpha=0.8)
                 drew_true = True
-            # draw prediction with temporal gaps shown as breaks
-            if "timestamp" in pdf.columns:
-                _plot_gap_aware_line(
-                    ax_ov, x, pdf["y_pred"].values, "--",
-                    label=f"Pred: {comparison_label}", marker="o", markersize=2,
-                )
-            else:
-                ax_ov.plot(x, pdf["y_pred"].values, "--", label=f"Pred: {comparison_label}")
+            # draw pred (give unique label)
+            ax_ov.plot(x, pdf["y_pred"].values, "--", label=f'Pred: {r["model"]}')
         ax_ov.set_title("Overlay predictions")
         ax_ov.legend(loc="best")
         ax_ov.set_xlabel(xlab); ax_ov.set_ylabel(handles["y_var"].get())
@@ -4701,12 +3373,8 @@ def _update_predict_plots(P, y_true, y_pred, title, y_var, timestamp=None,
         t_axis = np.asarray(_to_datetime_1d(timestamp))[order]
         yt_plot = np.asarray(y_true)[order]
         yp_plot = np.asarray(y_pred)[order]
-        _plot_gap_aware_line(
-            ax, t_axis, yt_plot, label="Observed held-out", marker="o", markersize=2,
-        )
-        _plot_gap_aware_line(
-            ax, t_axis, yp_plot, "--", label="Predicted held-out", marker="o", markersize=2,
-        )
+        ax.plot(t_axis, yt_plot, label="Observed held-out")
+        ax.plot(t_axis, yp_plot, "--", label="Predicted held-out")
         ax.set_xlabel("Time")
     else:
         ax.plot(y_true, label="Observed held-out")
@@ -5416,10 +4084,6 @@ def _run_predict_worker(P, df):
         tgt = P["y_var"].get()
         tscol = P["ts_var"].get()
         method = P["model"].get()
-        target_units_value = str(P.get("target_units").get()).strip() if P.get("target_units") is not None else ""
-        target_sign_value = str(P.get("target_sign_convention").get()).strip() if P.get("target_sign_convention") is not None else ""
-        target_units_value = target_units_value or "not provided"
-        target_sign_value = target_sign_value or "not provided"
 
         if not sel:
             return on_main(P["can_series"].get_tk_widget(), messagebox.showerror,
@@ -5444,23 +4108,8 @@ def _run_predict_worker(P, df):
 
         rs_mode = P["rs"].get()
         rs_label = {0: "Native", 1: "Daily", 2: "Weekly"}.get(rs_mode, "Native")
-        diurnal_mode_value = str(P.get("diurnal_mode").get() or "All observations")
-        diurnal_active = not diurnal_mode_value.lower().startswith("all")
-        daylight_variable_value = str(P.get("daylight_variable").get() or "").strip()
-        daylight_threshold_value = float(P.get("daylight_threshold").get() or 10.0)
-        if diurnal_active and rs_mode != 1:
-            raise ValueError(
-                "Daytime/nighttime sensitivity is a daily product. Select Daily resolution."
-            )
-        if diurnal_active and _target_family(tgt) != "CO2 flux / NEE":
-            raise ValueError(
-                "Daytime/nighttime sensitivity is intended for FC/NEE targets. "
-                "Use All observations for FCH4, FN2O, and other targets."
-            )
         period_start = P["analysis_start"].get() if P.get("analysis_start") is not None else None
         period_end = P["analysis_end"].get() if P.get("analysis_end") is not None else None
-        use_full_period_value = bool(P["use_full_period"].get()) if P.get("use_full_period") is not None else False
-        analysis_period_mode = "full available record" if use_full_period_value else "user-selected period"
 
         min_coverage = _parse_fraction(
             P["min_coverage_pct"].get(), _MIN_RESAMPLE_COVERAGE,
@@ -5478,15 +4127,7 @@ def _run_predict_worker(P, df):
         seq_len_value = max(2, int(P["seq_len"].get() or 20))
         hidden_value = max(2, int(P["hidden"].get() or 96))
         epochs_value = max(1, int(P["epochs"].get() or 100))
-        comparison_gate_value = str(P["gate_var"].get() or "").strip()
-        gate_value = (
-            comparison_gate_value
-            if method == "Hysteresis-Gate LSTM (H-LSTM)" else None
-        )
-        expected_sequence_step = (
-            pd.Timedelta(days=1) if rs_mode == 1 else
-            pd.Timedelta(days=7) if rs_mode == 2 else None
-        )
+        gate_value = P["gate_var"].get() if method == "Hysteresis-Gate LSTM (H-LSTM)" else None
 
         linear_fit_intercept_value = bool(P["linear_fit_intercept"].get())
 
@@ -5530,95 +4171,13 @@ def _run_predict_worker(P, df):
             min_value=0.20, max_value=0.90,
             label="initial training fraction",
         )
-        blocked_validation = "Blocked time-series CV" in split_strategy_used
-        use_common_sequence_folds_value = (
-            blocked_validation and bool(P["use_common_sequence_folds"].get())
-        )
-        # Figure 3B folds use common gap-safe sequence endpoints.
-        # The selected gate must be part of the common predictor list.
 
         # ------------------------------------------------------------------
         # Build one model-ready table before validation. Scaling remains fold-local.
         # ------------------------------------------------------------------
         _set_run_stage(P, "Building model-ready dataset…")
-        fold_gate_value = comparison_gate_value if use_common_sequence_folds_value else gate_value
-        if use_common_sequence_folds_value:
-            if not fold_gate_value or fold_gate_value not in df.columns:
-                raise ValueError(
-                    "Select a valid H-LSTM gate before using the common Figure 3B endpoint timeline."
-                )
-            if fold_gate_value not in sel:
-                raise ValueError(
-                    "For Figure 3B, the H-LSTM gate must also be selected in the common predictor list."
-                )
-
-        needed = list(dict.fromkeys(
-            sel + [tgt, tscol] + ([fold_gate_value] if fold_gate_value else []) +
-            ([daylight_variable_value] if diurnal_active else [])
-        ))
-        df_period_full = _filter_analysis_period(df[needed], tscol, period_start, period_end)
-        selected_analysis_start_actual = pd.to_datetime(df_period_full[tscol], errors="coerce").min()
-        selected_analysis_end_actual = pd.to_datetime(df_period_full[tscol], errors="coerce").max()
-        df_period, diurnal_metadata = _apply_diurnal_subset(
-            df_period_full, tscol, diurnal_mode_value,
-            daylight_variable_value, daylight_threshold_value,
-        )
-
-        reporting_frame = _reporting_frame(
-            df_period, sel + [tgt], tscol, rs_mode, min_coverage,
-            sum_columns=sum_overrides, mean_columns=mean_overrides,
-            coverage_relative_to_available_rows=diurnal_active,
-        )
-        variable_coverage_df = _variable_coverage_summary(
-            reporting_frame, sel + [tgt], tgt,
-            gate_variable=fold_gate_value,
-            sum_columns=sum_overrides, mean_columns=mean_overrides,
-        )
-        sequence_diagnostics = {}
-        common_reference_diagnostics = {}
-
-        # Preserve variable-specific missingness for sequence construction.
-        # Predictor windows must be complete, but the target is required only at
-        # the prediction endpoint. Nonsequence models use the separate complete
-        # endpoint frame below.
-        dfw_all, rs_label = _resample_view(
-            df_period, rs_mode, tscol,
-            min_coverage=min_coverage,
-            sum_columns=sum_overrides,
-            mean_columns=mean_overrides,
-            coverage_relative_to_available_rows=diurnal_active,
-            drop_complete_cases=False,
-        )
-        dfw_complete = (
-            dfw_all[sel + [tgt]]
-            .apply(pd.to_numeric, errors="coerce")
-            .replace([np.inf, -np.inf], np.nan)
-            .dropna(how="any")
-        )
-
-        common_endpoint_ts = None
-        common_h_X = common_h_y = None
-        dfw_h_common = None
-        if use_common_sequence_folds_value:
-            dfw_h_common = _prepare_h_lstm_frame(
-                df_period, sel, tgt, fold_gate_value, tscol, rs_mode,
-                min_coverage=min_coverage,
-                sum_columns=sum_overrides,
-                mean_columns=mean_overrides,
-                coverage_relative_to_available_rows=diurnal_active,
-            )
-            common_h_X, common_h_y, common_endpoint_ts, common_reference_diagnostics = _make_seq_data(
-                dfw_h_common, sel, tgt, fold_gate_value, seq_len_value,
-                return_diagnostics=True, expected_step=expected_sequence_step,
-            )
-            common_endpoint_ts = pd.Index(common_endpoint_ts)
-            minimum_endpoints = max(2 * requested_folds + 2, requested_folds + 3)
-            if len(common_endpoint_ts) < minimum_endpoints:
-                raise ValueError(
-                    f"Only {len(common_endpoint_ts)} common gap-safe sequence endpoints remain. "
-                    f"At least {minimum_endpoints} are needed for {requested_folds} expanding folds. "
-                    "Shorten the sequence, remove an overlap-limiting predictor, or choose a better-covered period."
-                )
+        needed = list(dict.fromkeys(sel + [tgt, tscol] + ([gate_value] if gate_value else [])))
+        df_period = _filter_analysis_period(df[needed], tscol, period_start, period_end)
 
         if method == "Hysteresis-Gate LSTM (H-LSTM)":
             if not gate_value or gate_value not in df.columns:
@@ -5628,95 +4187,37 @@ def _run_predict_worker(P, df):
                     "For a fair model comparison, the H-LSTM gate variable must also be selected "
                     "in the common predictor list."
                 )
-            if use_common_sequence_folds_value:
-                dfw = dfw_h_common
-                X_model = np.asarray(common_h_X, dtype=float)
-                y_model = np.asarray(common_h_y, dtype=float)
-                model_timestamps = common_endpoint_ts
-                sequence_diagnostics = dict(common_reference_diagnostics)
-            else:
-                dfw = _prepare_h_lstm_frame(
-                    df_period, sel, tgt, gate_value, tscol, rs_mode,
-                    min_coverage=min_coverage,
-                    sum_columns=sum_overrides,
-                    mean_columns=mean_overrides,
-                    coverage_relative_to_available_rows=diurnal_active,
-                )
-                X_model, y_model, model_timestamps, sequence_diagnostics = _make_seq_data(
-                    dfw, sel, tgt, gate_value, seq_len_value,
-                    return_diagnostics=True, expected_step=expected_sequence_step,
-                )
-            title = f"H-LSTM | {rs_label}"
-        elif method == "LSTM (Keras)":
-            dfw = dfw_all
-            X_lstm, y_lstm, ts_lstm, sequence_diagnostics = _make_lstm_sequence_data(
-                dfw, sel, tgt, seq_len_value, return_diagnostics=True,
-                expected_step=expected_sequence_step,
+            dfw = _prepare_h_lstm_frame(
+                df_period, sel, tgt, gate_value, tscol, rs_mode,
+                min_coverage=min_coverage,
+                sum_columns=sum_overrides,
+                mean_columns=mean_overrides,
             )
-            if use_common_sequence_folds_value:
-                indexer = pd.Index(ts_lstm).get_indexer(common_endpoint_ts)
-                if np.any(indexer < 0):
-                    raise ValueError(
-                        "The standard LSTM could not align to every common H-LSTM endpoint. "
-                        "Clear runs and verify that all models use the same predictors, gate, sequence length, and period."
-                    )
-                X_model = np.asarray(X_lstm, dtype=float)[indexer]
-                y_model = np.asarray(y_lstm, dtype=float)[indexer]
-                model_timestamps = common_endpoint_ts
-                sequence_diagnostics = dict(sequence_diagnostics)
-                sequence_diagnostics["aligned_common_endpoints"] = int(len(common_endpoint_ts))
-            else:
-                X_model, y_model, model_timestamps = X_lstm, y_lstm, pd.Index(ts_lstm)
-            title = f"LSTM | {rs_label}"
+            X_model, y_model, model_timestamps = _make_seq_data(
+                dfw, sel, tgt, gate_value, seq_len_value
+            )
+            title = f"H-LSTM | {rs_label}"
         else:
-            dfw = dfw_complete
-            if use_common_sequence_folds_value:
-                endpoint_frame = dfw_all.reindex(common_endpoint_ts)
-                if endpoint_frame[sel + [tgt]].isna().any().any():
-                    raise ValueError(
-                        "A nonsequence model could not align to all common sequence endpoints. "
-                        "Verify identical preprocessing and predictor selections."
-                    )
-                X_model = endpoint_frame[sel].to_numpy(dtype=float)
-                y_model = endpoint_frame[tgt].to_numpy(dtype=float)
-                model_timestamps = common_endpoint_ts
+            dfw, rs_label = _resample_view(
+                df_period, rs_mode, tscol,
+                min_coverage=min_coverage,
+                sum_columns=sum_overrides,
+                mean_columns=mean_overrides,
+            )
+            if method == "LSTM (Keras)":
+                X_model, y_model, model_timestamps = _make_lstm_sequence_data(
+                    dfw, sel, tgt, seq_len_value
+                )
+                title = f"LSTM | {rs_label}"
             else:
                 X_model = dfw[sel].to_numpy(dtype=float)
                 y_model = dfw[tgt].to_numpy(dtype=float)
                 model_timestamps = pd.Index(dfw.index)
-            title = f"{_plain_model_name(method)} | {rs_label}"
-
-        if not sequence_diagnostics:
-            time_info = _timestamp_gap_diagnostics(model_timestamps)
-            sequence_diagnostics = {
-                "sequence_policy": "not applicable",
-                "expected_timestep": time_info["expected_timestep"],
-                "sequence_length": None,
-                "n_complete_rows_before_sequences": int(len(dfw_complete)),
-                "n_candidate_sequence_windows": None,
-                "n_valid_sequences": None,
-                "n_rejected_gap_windows": 0,
-                "n_source_gaps": int(time_info["n_gaps"]),
-                "max_source_interval": time_info["max_interval"],
-                "max_source_interval_days": time_info["max_interval_days"],
-                "rejected_timestamps": pd.DatetimeIndex([]),
-            }
-
-        # Validation is defined on the ordered model-ready endpoint timeline.
-        # In Figure 3B mode this is the exact same common gap-safe endpoint index
-        # for all five models, so five requested folds cannot disappear during
-        # later sequence alignment.
-        validation_reference_timestamps = pd.Index(model_timestamps)
-        validation_reference_text = (
-            f"common gap-safe sequence endpoints (gate={fold_gate_value}, "
-            f"sequence={seq_len_value}, n={len(model_timestamps)})"
-            if use_common_sequence_folds_value else
-            "the current model-ready endpoint timeline"
-        )
+                title = f"{_plain_model_name(method)} | {rs_label}"
 
         validation_splits = _make_timestamp_aligned_validation_splits(
-            model_timestamps, validation_reference_timestamps,
-            split_strategy_used, frac_for_split, requested_folds,
+            model_timestamps, pd.Index(dfw.index), split_strategy_used,
+            frac_for_split, requested_folds,
             initial_train_fraction=initial_train_fraction_value,
         )
         test_frac_used = (
@@ -5740,19 +4241,11 @@ def _run_predict_worker(P, df):
             "n_test": int(len(all_test_idx)),
             "train_period": _fmt_time_range(model_timestamps[validation_splits[0][1]]),
             "test_period": _fmt_time_range(model_timestamps[all_test_idx]),
-            "selected_analysis_period": _fmt_time_range(df_period_full[tscol]),
-            "diurnal_mode": diurnal_metadata["diurnal_mode"],
+            "selected_analysis_period": _fmt_time_range(df_period[tscol]),
             "complete_case_period": _fmt_time_range(model_timestamps),
             "n_period_rows": int(len(df_period)),
-            "n_resampled_rows": int(len(reporting_frame)),
-            "n_complete_case_rows": int(len(dfw_complete)),
-            "n_model_ready_rows": int(len(y_model)),
-            "n_rejected_gap_windows": int(sequence_diagnostics.get("n_rejected_gap_windows", 0) or 0),
             "n_folds": int(n_folds_used),
-            "requested_n_folds": int(requested_folds),
             "initial_train_fraction": initial_train_fraction_value,
-            "validation_reference": validation_reference_text,
-            "comparison_gate_variable": comparison_gate_value,
             "resampling_summary": resampling_text,
         }
         if len(y_model) < max(10, 0.25 * len(df_period)):
@@ -5763,24 +4256,10 @@ def _run_predict_worker(P, df):
         split_text = _split_summary_text(split_info)
         if n_folds_used > 1:
             split_text += (
-                f"\nFolds: {n_folds_used}/{requested_folds} expanding-window future blocks; "
-                f"cutoffs defined from {validation_reference_text}; "
+                f"\nFolds: {n_folds_used} expanding-window future blocks; "
                 "pooled metrics use all out-of-fold predictions."
             )
-        if diurnal_active:
-            split_text += (
-                f"\nDiurnal sensitivity: {diurnal_metadata['diurnal_mode']} using "
-                f"{daylight_variable_value} threshold {daylight_threshold_value:g}; "
-                f"{diurnal_metadata['rows_after_diurnal_filter']:,} subdaily rows retained."
-            )
         split_text += "\nResampling: " + resampling_text
-        if method in ("LSTM (Keras)", "Hysteresis-Gate LSTM (H-LSTM)"):
-            split_text += (
-                f"\nSequences: {sequence_diagnostics.get('n_valid_sequences', 0):,} valid; "
-                f"target required only at endpoints; "
-                f"{sequence_diagnostics.get('n_rejected_gap_windows', 0):,} rejected for temporal gaps; "
-                f"{sequence_diagnostics.get('n_rejected_missing_predictor_windows', 0):,} rejected for incomplete predictor windows."
-            )
         ensure_on_main(P["can_series"].get_tk_widget(), P["split_msg"].configure,
                        text=split_text)
 
@@ -5803,7 +4282,6 @@ def _run_predict_worker(P, df):
             )
 
         pooled_true, pooled_pred, pooled_time, pooled_fold = [], [], [], []
-        pooled_training_mean, pooled_seasonal_climatology = [], []
         fold_records = []
         rf_importance_means, rf_importance_stds = [], []
         importance_scoring = None
@@ -5871,17 +4349,16 @@ def _run_predict_worker(P, df):
                     hidden=hidden_value,
                     learning_rate=lstm_learning_rate_value,
                     dropout=lstm_dropout_value,
-                    gradient_clip=hlstm_gradient_clip_value,
                     train_idx=tr, test_idx=ts,
                     progress_cb=cb, info_cb=P["monitor"].info,
                     seed=seed,
                 )
             elif method == "Hysteresis-Gate LSTM (H-LSTM)":
-                yt, yp, fitted_model, _ = run_hysteresis_lstm_sequences(
-                    X_model, y_model,
+                yt, yp, _ts_returned, _ = run_hysteresis_lstm(
+                    dfw, sel, tgt, gate_value,
+                    seq_len=seq_len_value,
                     hidden=hidden_value,
                     epochs=epochs_value,
-                    batch_size=lstm_batch_size_value,
                     learning_rate=hlstm_learning_rate_value,
                     dropout=hlstm_dropout_value,
                     gradient_clip=hlstm_gradient_clip_value,
@@ -5893,59 +4370,20 @@ def _run_predict_worker(P, df):
                 raise ValueError(f"Unsupported model: {method}")
 
             fold_ts = pd.Index(model_timestamps)[ts]
-            training_mean_pred = np.full(
-                len(ts), float(np.nanmean(np.asarray(y_model, dtype=float)[tr])), dtype=float
-            )
-            seasonal_pred = _seasonal_climatology_predictions(
-                y_model, model_timestamps, tr, ts, window_days=7
-            )
             pooled_true.extend(np.asarray(yt, dtype=float).tolist())
             pooled_pred.extend(np.asarray(yp, dtype=float).tolist())
-            pooled_training_mean.extend(training_mean_pred.tolist())
-            pooled_seasonal_climatology.extend(seasonal_pred.tolist())
             pooled_time.extend(list(fold_ts))
             pooled_fold.extend([int(fold_id)] * len(yt))
-            fold_record = _fold_metric_record(
-                fold_id, yt, yp, tr, ts, fold_ts,
-                all_timestamps=model_timestamps,
-                sequence_diagnostics=sequence_diagnostics,
-            )
-            mean_metrics_fold = _metric_bundle(yt, training_mean_pred)
-            seasonal_metrics_fold = _metric_bundle(yt, seasonal_pred)
-            fold_record.update({
-                "training_mean_rmse": mean_metrics_fold["rmse"],
-                "training_mean_nrmse_p5_p95": mean_metrics_fold["nrmse_p5_p95"],
-                "training_mean_mae": mean_metrics_fold["mae"],
-                "training_mean_r2": mean_metrics_fold["r2"],
-                "seasonal_climatology_rmse": seasonal_metrics_fold["rmse"],
-                "seasonal_climatology_nrmse_p5_p95": seasonal_metrics_fold["nrmse_p5_p95"],
-                "seasonal_climatology_mae": seasonal_metrics_fold["mae"],
-                "seasonal_climatology_r2": seasonal_metrics_fold["r2"],
-                "skill_vs_training_mean": _baseline_skill_score(yt, yp, training_mean_pred),
-                "skill_vs_seasonal_climatology": _baseline_skill_score(yt, yp, seasonal_pred),
-                "beats_training_mean": bool(_metric_bundle(yt, yp)["rmse"] < mean_metrics_fold["rmse"]),
-                "beats_seasonal_climatology": bool(_metric_bundle(yt, yp)["rmse"] < seasonal_metrics_fold["rmse"]),
-            })
-            fold_records.append(fold_record)
+            fold_records.append(_fold_metric_record(fold_id, yt, yp, tr, ts, fold_ts))
 
         if not pooled_true:
             raise RuntimeError("No validation predictions were produced.")
 
         y_true = np.asarray(pooled_true, dtype=float)
         y_pred = np.asarray(pooled_pred, dtype=float)
-        training_mean_pred = np.asarray(pooled_training_mean, dtype=float)
-        seasonal_climatology_pred = np.asarray(pooled_seasonal_climatology, dtype=float)
         timestamp = pd.Index(pooled_time)
         fold_ids = np.asarray(pooled_fold, dtype=int)
         fold_metrics_df = pd.DataFrame(fold_records)
-        actual_fold_ids = sorted(pd.to_numeric(fold_metrics_df.get("fold"), errors="coerce").dropna().astype(int).unique().tolist())
-        if blocked_validation:
-            expected_fold_ids = list(range(1, requested_folds + 1))
-            if actual_fold_ids != expected_fold_ids:
-                raise RuntimeError(
-                    f"Blocked CV requested folds {expected_fold_ids}, but predictions were produced for "
-                    f"{actual_fold_ids}. The run was not saved."
-                )
 
         imp = imp_std = None
         importance_df = None
@@ -5982,47 +4420,10 @@ def _run_predict_worker(P, df):
             it_bridge_df["fold"] = fold_ids
 
         metrics = _metric_bundle(y_true, y_pred)
-        training_mean_metrics = _metric_bundle(y_true, training_mean_pred)
-        seasonal_climatology_metrics = _metric_bundle(y_true, seasonal_climatology_pred)
-        skill_vs_training_mean = _baseline_skill_score(
-            y_true, y_pred, training_mean_pred
-        )
-        skill_vs_seasonal_climatology = _baseline_skill_score(
-            y_true, y_pred, seasonal_climatology_pred
-        )
-        folds_beating_training_mean = int(
-            pd.Series(fold_metrics_df.get("beats_training_mean", [])).fillna(False).astype(bool).sum()
-        )
-        folds_beating_seasonal = int(
-            pd.Series(fold_metrics_df.get("beats_seasonal_climatology", [])).fillna(False).astype(bool).sum()
-        )
-        baseline_metrics_df = pd.DataFrame([
-            {"benchmark": "Model", **metrics},
-            {"benchmark": "Training-fold mean", **training_mean_metrics},
-            {"benchmark": "Seasonal climatology ±7 DOY", **seasonal_climatology_metrics},
-        ])
-        baseline_summary = (
-            f"Baseline benchmark on identical held-out dates:\n"
-            f"• Training-fold mean: R²={training_mean_metrics['r2']:.3g}, "
-            f"nRMSE={training_mean_metrics['nrmse_p5_p95']:.3g}%\n"
-            f"• Seasonal climatology (training-only ±7 day-of-year): "
-            f"R²={seasonal_climatology_metrics['r2']:.3g}, "
-            f"nRMSE={seasonal_climatology_metrics['nrmse_p5_p95']:.3g}%\n"
-            f"• Model skill vs mean={skill_vs_training_mean:.3g}; "
-            f"vs climatology={skill_vs_seasonal_climatology:.3g}\n"
-            f"• Model beats mean in {folds_beating_training_mean}/{n_folds_used} folds; "
-            f"climatology in {folds_beating_seasonal}/{n_folds_used} folds."
-        )
-        ensure_on_main(
-            P["can_series"].get_tk_widget(), P["baseline_msg"].configure,
-            text=baseline_summary,
-        )
         pred_df = P.get("last_pred_df")
         if pred_df is not None:
             pred_df = pred_df.copy()
             pred_df["fold"] = fold_ids
-            pred_df["pred_training_mean"] = training_mean_pred
-            pred_df["pred_seasonal_climatology"] = seasonal_climatology_pred
             pred_df["model"] = method
             pred_df["target"] = tgt
             P["last_pred_df"] = pred_df
@@ -6066,8 +4467,6 @@ def _run_predict_worker(P, df):
                 "batch_size": lstm_batch_size_value,
                 "learning_rate": lstm_learning_rate_value,
                 "dropout": lstm_dropout_value,
-                "gradient_clip": hlstm_gradient_clip_value,
-                "framework": "TensorFlow/Keras",
                 "shuffle": False,
             }
             hidden_size_record = hidden_value
@@ -6078,42 +4477,20 @@ def _run_predict_worker(P, df):
                 "sequence_length": seq_len_value,
                 "hidden_size": hidden_value,
                 "epochs": epochs_value,
-                "batch_size": lstm_batch_size_value,
                 "learning_rate": hlstm_learning_rate_value,
                 "dropout": hlstm_dropout_value,
                 "gradient_clip": hlstm_gradient_clip_value,
                 "gate_variable": gate_value,
                 "includes_delta_gate": True,
-                "framework": "TensorFlow/Keras",
-                "controlled_difference": "same LSTM training as standard LSTM; adds delta-gate input channel only",
-                "shuffle": False,
+                "training_mode": "full batch per fold",
             }
             hidden_size_record = hidden_value
             epochs_record = epochs_value
-            batch_size_record = lstm_batch_size_value
-
-        sequence_diagnostics_export = {
-            k: v for k, v in sequence_diagnostics.items()
-            if not str(k).endswith("_timestamps") and k != "rejected_timestamps"
-        }
-        common_reference_diagnostics_export = {
-            k: v for k, v in common_reference_diagnostics.items()
-            if not str(k).endswith("_timestamps") and k != "rejected_timestamps"
-        }
-        data_counts = {
-            "input_rows": int(len(df)),
-            "selected_period_rows": int(len(df_period_full)),
-            "diurnal_subset_rows": int(len(df_period)),
-            "resampled_period_rows": int(len(reporting_frame)),
-            "complete_case_rows": int(len(dfw_complete)),
-            "model_ready_rows": int(len(y_model)),
-            "held_out_predictions": int(len(y_true)),
-        }
+            batch_size_record = None
 
         run_rec = dict(
             when=pd.Timestamp.utcnow(), model=method, resample=rs_label,
-            target=tgt, target_units=target_units_value,
-            target_sign_convention=target_sign_value, features=sel,
+            target=tgt, features=sel,
             rmse=metrics["rmse"], mae=metrics["mae"], r2=metrics["r2"],
             nrmse_p5_p95=metrics["nrmse_p5_p95"],
             observed_p05=metrics["observed_p05"],
@@ -6121,39 +4498,19 @@ def _run_predict_worker(P, df):
             pred_df=P.get("last_pred_df"),
             importance_df=(importance_df.copy() if importance_df is not None else None),
             fold_metrics_df=fold_metrics_df,
-            baseline_metrics_df=baseline_metrics_df,
-            training_mean_metrics=training_mean_metrics,
-            seasonal_climatology_metrics=seasonal_climatology_metrics,
-            skill_vs_training_mean=skill_vs_training_mean,
-            skill_vs_seasonal_climatology=skill_vs_seasonal_climatology,
-            folds_beating_training_mean=folds_beating_training_mean,
-            folds_beating_seasonal_climatology=folds_beating_seasonal,
             it_bridge_df=it_bridge_df,
             prediction_column=pred_col,
             residual_column=resid_col,
             split_strategy=split_strategy_used,
             test_fraction=test_frac_used,
             n_folds=n_folds_used,
-            requested_n_folds=requested_folds,
-            validation_reference=validation_reference_text,
-            comparison_gate_variable=comparison_gate_value,
-            use_common_sequence_folds=use_common_sequence_folds_value,
-            common_reference_diagnostics=common_reference_diagnostics_export,
             n_train=(min(n_train_values) if n_folds_used == 1 else max(n_train_values)),
             n_train_min=min(n_train_values),
             n_train_max=max(n_train_values),
             n_test=len(y_true),
             split_info=split_info,
-            analysis_period_mode=analysis_period_mode,
             analysis_start=period_start,
             analysis_end=period_end,
-            diurnal_mode=diurnal_metadata["diurnal_mode"],
-            daylight_variable=diurnal_metadata["daylight_variable"],
-            daylight_threshold=diurnal_metadata["daylight_threshold"],
-            selected_analysis_start=selected_analysis_start_actual,
-            selected_analysis_end=selected_analysis_end_actual,
-            model_ready_start=pd.to_datetime(pd.Index(model_timestamps), errors="coerce").min(),
-            model_ready_end=pd.to_datetime(pd.Index(model_timestamps), errors="coerce").max(),
             sequence_length=(
                 seq_len_value
                 if method in ("LSTM (Keras)", "Hysteresis-Gate LSTM (H-LSTM)")
@@ -6175,42 +4532,6 @@ def _run_predict_worker(P, df):
             mean_override_columns=mean_overrides,
             resampling_summary=resampling_text,
             importance_scoring=importance_scoring,
-            missing_data_handling=("no imputation; sequence predictors complete at every step; "
-                                  "target required only at prediction endpoint; nonsequence models "
-                                  "use complete predictor+target endpoint rows"),
-            outlier_handling="no automatic statistical outlier removal; upstream QA/QC and user masks only",
-            diurnal_cycle_handling=(
-                (
-                    f"{diurnal_metadata['diurnal_mode']} daily mean using "
-                    f"{diurnal_metadata['daylight_variable']} threshold "
-                    f"{diurnal_metadata['daylight_threshold']:g}; optional FC sensitivity"
-                )
-                if diurnal_active else
-                "daily aggregation; diurnal cycle not modeled explicitly"
-                if rs_label == "Daily" else
-                "weekly aggregation; diurnal cycle not modeled explicitly"
-                if rs_label == "Weekly" else
-                "native resolution; diurnal cycle preserved unless represented by selected predictors"
-            ),
-            data_counts=data_counts,
-            variable_coverage_df=variable_coverage_df.copy(),
-            sequence_diagnostics=sequence_diagnostics_export,
-            sequence_policy=sequence_diagnostics_export.get("sequence_policy"),
-            expected_timestep=sequence_diagnostics_export.get("expected_timestep"),
-            n_candidate_sequence_windows=sequence_diagnostics_export.get("n_candidate_sequence_windows"),
-            n_valid_sequences=sequence_diagnostics_export.get("n_valid_sequences"),
-            n_rejected_gap_windows=sequence_diagnostics_export.get("n_rejected_gap_windows", 0),
-            n_rejected_missing_endpoint_target=sequence_diagnostics_export.get(
-                "n_rejected_missing_endpoint_target", 0
-            ),
-            n_rejected_missing_predictor_windows=sequence_diagnostics_export.get(
-                "n_rejected_missing_predictor_windows", 0
-            ),
-            target_requirement=sequence_diagnostics_export.get("target_requirement"),
-            predictor_requirement=sequence_diagnostics_export.get("predictor_requirement"),
-            n_source_gaps=sequence_diagnostics_export.get("n_source_gaps", 0),
-            max_source_interval=sequence_diagnostics_export.get("max_source_interval"),
-            max_source_interval_days=sequence_diagnostics_export.get("max_source_interval_days"),
             model_parameters=model_parameters,
             initial_train_fraction=(
                 initial_train_fraction_value
@@ -6224,8 +4545,6 @@ def _run_predict_worker(P, df):
         P["current_it_metadata"] = pd.DataFrame([{
             "model": method,
             "target": tgt,
-            "target_units": target_units_value,
-            "target_sign_convention": target_sign_value,
             "observed_column": f"{tgt}_obs",
             "prediction_column": pred_col,
             "residual_column": resid_col,
@@ -6237,39 +4556,18 @@ def _run_predict_worker(P, df):
             "mean_override_columns": ", ".join(mean_overrides),
             "split_strategy": split_strategy_used,
             "n_folds": n_folds_used,
-            "requested_n_folds": requested_folds,
-            "validation_reference": validation_reference_text,
-            "comparison_gate_variable": comparison_gate_value,
-            "use_common_sequence_folds": use_common_sequence_folds_value,
             "initial_train_fraction": run_rec["initial_train_fraction"],
             "test_fraction": test_frac_used,
             "n_train_min": min(n_train_values),
             "n_train_max": max(n_train_values),
             "n_test": len(y_true),
-            "data_counts": str(data_counts),
-            "sequence_diagnostics": str(sequence_diagnostics_export),
-            "target_requirement": sequence_diagnostics_export.get("target_requirement"),
-            "predictor_requirement": sequence_diagnostics_export.get("predictor_requirement"),
-            "n_rejected_missing_endpoint_target": sequence_diagnostics_export.get(
-                "n_rejected_missing_endpoint_target", 0
-            ),
-            "n_rejected_missing_predictor_windows": sequence_diagnostics_export.get(
-                "n_rejected_missing_predictor_windows", 0
-            ),
             "analysis_start": period_start,
             "analysis_end": period_end,
-            "diurnal_mode": diurnal_metadata["diurnal_mode"],
-            "daylight_variable": diurnal_metadata["daylight_variable"],
-            "daylight_threshold": diurnal_metadata["daylight_threshold"],
             "test_period": split_info.get("test_period"),
             "rmse": metrics["rmse"],
             "nrmse_p5_p95": metrics["nrmse_p5_p95"],
             "mae": metrics["mae"],
             "r2": metrics["r2"],
-            "skill_vs_training_mean": skill_vs_training_mean,
-            "skill_vs_seasonal_climatology": skill_vs_seasonal_climatology,
-            "folds_beating_training_mean": folds_beating_training_mean,
-            "folds_beating_seasonal_climatology": folds_beating_seasonal,
             "sequence_length": run_rec["sequence_length"],
             "hidden_size": run_rec["hidden_size"],
             "epochs": run_rec["epochs"],
@@ -6277,9 +4575,6 @@ def _run_predict_worker(P, df):
             "gate_variable": gate_value,
             "random_seed": base_seed,
             "scaling": run_rec["scaling"],
-            "missing_data_handling": run_rec["missing_data_handling"],
-            "outlier_handling": run_rec["outlier_handling"],
-            "diurnal_cycle_handling": run_rec["diurnal_cycle_handling"],
             "model_parameters": str(model_parameters),
         }])
         on_main(P["btn_open_it"], P["btn_open_it"].configure, state="normal")
