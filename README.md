@@ -315,8 +315,6 @@ Results should be interpreted in the context of:
 - site characteristics
 - preprocessing choices
 
-For example, interpretation of net CO2 flux (FC/NEE) requires particular care because the measured net exchange integrates photosynthetic uptake and ecosystem respiration.
-
 ---
 
 ## Version
