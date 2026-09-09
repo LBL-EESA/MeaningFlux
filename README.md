@@ -60,10 +60,14 @@ MeaningFlux does not replace standard EC processing, site-specific quality contr
 - CO2 flux partitioning utilities
 - N2O gap filling
 - CH4 gap filling
-- Multiple machine-learning options for CH4 gap filling, including XGBoost
+- Multiple machine-learning options for CH4 gap filling.
 
 Original and gap-filled variables are kept distinguishable so users can preserve data provenance in downstream analyses.
 
+Optional CH4 gap-filling dependency:
+
+```bash
+pip install xgboost
 ---
 
 ## Machine Learning Toolbox
