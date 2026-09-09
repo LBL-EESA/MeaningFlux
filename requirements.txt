@@ -20,4 +20,4 @@ future
 pytest
 tensorflow
 openpyxl
-xgboost
+
