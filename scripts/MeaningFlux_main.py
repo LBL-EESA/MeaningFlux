@@ -37,10 +37,18 @@ import numpy as np
 import os
 
 # --- Paths / imports ---
-ROOT = Path(__file__).resolve().parents[1]   # .../meaningflux_code
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    # Running as a packaged application
+    ROOT = Path(sys._MEIPASS)
+else:
+    # Running from the source repository
+    ROOT = Path(__file__).resolve().parents[1]
+
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+
+if not getattr(sys, "frozen", False):
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
 
 # ===== Project-specific imports =====
 from calc_plot_time_series import calc_plot_time_series
