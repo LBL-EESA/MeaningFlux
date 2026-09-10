@@ -4,7 +4,7 @@ This folder contains the materials for the hands-on MeaningFlux workshop at the 
 
 ## Workshop files
 
-* `MeaningFlux_AmeriFlux2026_Tutorial.pdf`: Step-by-step participant instructions
+* `MeaningFlux_AmeriFlux2026_Tutorial.pdf`: Step-by-step participant guide
 * `MeaningFlux_AmeriFlux2026_Workshop_Slides.pdf`: Workshop presentation
 * `AMF_US-Var_BASE_HH_27-5.csv`: AmeriFlux BASE sample dataset for US-Var
 
@@ -12,45 +12,75 @@ This folder contains the materials for the hands-on MeaningFlux workshop at the 
 
 We will use:
 
-* Target variable: `LE`
-* Environmental drivers: `NETRAD`, `VPD_PI`, `TA`, and `SWC_PI_1_2_A`
+* Target: `LE`
+* Drivers: `NETRAD`, `VPD_PI`, `TA`, and `SWC_PI_1_2_A`
 * Models: Linear Regression and Random Forest
 * Analyses: model evaluation, mutual information, partial information decomposition, and observed-versus-modeled information fidelity
 
 ## Installation instructions
 
-### 1. Install Anaconda or Miniconda
+Please complete these steps before the workshop.
 
-If you do not already have Anaconda or Miniconda, install one of them:
+### 1. Install Conda
 
-- [Download Anaconda](https://www.anaconda.com/download)
-- [Download Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)
+Install either:
+
+* [Anaconda](https://www.anaconda.com/download)
+* [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)
 
 ### 2. Download MeaningFlux
 
 1. Open the [MeaningFlux repository](https://github.com/LBL-EESA/MeaningFlux).
 2. Click the green **Code** button.
 3. Select **Download ZIP**.
-4. Open your Downloads folder.
-5. Unzip `MeaningFlux-main.zip`.
+4. Unzip `MeaningFlux-main.zip`.
 
 ### 3. Open a terminal
 
-- **Windows:** Open **Anaconda Prompt** from the Start menu.
-- **macOS:** Open the **Terminal** application.
+* **Windows:** Open **Anaconda Prompt**.
+* **macOS:** Open **Terminal**.
 
-### 4. Move into the MeaningFlux folder
+### 4. Enter the MeaningFlux folder
 
-Type `cd`, add one space, and then drag the unzipped `MeaningFlux-main` folder from your file browser into the terminal window.
+Type `cd` followed by a space. Then drag the unzipped `MeaningFlux-main` folder into the terminal and press **Enter**.
 
-The command will look similar to:
-
-**macOS**
+For example:
 
 ```bash
 cd /Users/your-name/Downloads/MeaningFlux-main
+```
 
-Please install MeaningFlux and confirm that the application opens before the workshop.
+### 5. Install and start MeaningFlux
+
+Copy and run each command separately:
+
+```bash
+conda create -n meaningflux-workshop python=3.10 -y
+```
+
+```bash
+conda activate meaningflux-workshop
+```
+
+```bash
+pip install -r requirements-workshop.txt
+```
+
+```bash
+python scripts/MeaningFlux_main.py
+```
+
+The MeaningFlux window should open. Keep the terminal open while using the program.
+
+Please confirm that MeaningFlux opens successfully before the workshop.
+
+## Troubleshooting
+
+If MeaningFlux does not open:
+
+1. Confirm that `(meaningflux-workshop)` appears at the beginning of the terminal line.
+2. Confirm that you are inside the `MeaningFlux-main` folder.
+3. Copy the complete error message and bring it to the workshop.
 
 ## Main repository
 
