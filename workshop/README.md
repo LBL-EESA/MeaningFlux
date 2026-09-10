@@ -17,16 +17,38 @@ We will use:
 * Models: Linear Regression and Random Forest
 * Analyses: model evaluation, mutual information, partial information decomposition, and observed-versus-modeled information fidelity
 
-## Installation
+## Installation instructions
 
-From the main MeaningFlux repository folder, run:
+### 1. Install Anaconda or Miniconda
+
+If you do not already have Anaconda or Miniconda, install one of them:
+
+- [Download Anaconda](https://www.anaconda.com/download)
+- [Download Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)
+
+### 2. Download MeaningFlux
+
+1. Open the [MeaningFlux repository](https://github.com/LBL-EESA/MeaningFlux).
+2. Click the green **Code** button.
+3. Select **Download ZIP**.
+4. Open your Downloads folder.
+5. Unzip `MeaningFlux-main.zip`.
+
+### 3. Open a terminal
+
+- **Windows:** Open **Anaconda Prompt** from the Start menu.
+- **macOS:** Open the **Terminal** application.
+
+### 4. Move into the MeaningFlux folder
+
+Type `cd`, add one space, and then drag the unzipped `MeaningFlux-main` folder from your file browser into the terminal window.
+
+The command will look similar to:
+
+**macOS**
 
 ```bash
-conda create -n meaningflux-workshop python=3.10
-conda activate meaningflux-workshop
-pip install -r requirements-workshop.txt
-python scripts/MeaningFlux_main.py
-```
+cd /Users/your-name/Downloads/MeaningFlux-main
 
 Please install MeaningFlux and confirm that the application opens before the workshop.
 
